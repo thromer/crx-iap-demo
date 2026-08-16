@@ -780,8 +780,7 @@ Build in this order and **stop for review at each checkpoint**:
 3. Playwright fixtures, `wakeWorker()`, the stand-in relay, and tests 1, 8, 10, 15, 23, 40, 53,
    57 — one from each group, chosen to prove the harness can reach everything it needs before
    you invest in the other fifty. **Checkpoint.**
-4. The remaining tests, including the `via: 'sw' | 'worker'` parameterization and test 64's
-   Service Worker check.
+4. The remaining tests, including the `via: 'sw' | 'worker'` parameterization.
 5. `docs/manual-verification.md`.
 
 Each checkpoint includes `pnpm biome check` and `pnpm tsc --noEmit` passing clean across all
