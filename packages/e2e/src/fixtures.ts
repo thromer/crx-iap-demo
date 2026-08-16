@@ -32,9 +32,22 @@
 //      succeeding again; `serviceWorkers()[0]` is the same object reference), so there is
 //      nothing to "re-acquire." `wakeWorker()` below sends a harmless message from a throwaway
 //      page instead of waiting on an event, and returns the same handle it was given.
+//   6. `context.setOffline(true)` blocks a page-level `fetch()` in this environment but does
+//      NOT block the stand-in's dedicated Worker fetch, spawned from the extension's offscreen
+//      document — confirmed directly via a message-level check. Playwright's offline network
+//      emulation apparently doesn't reach that target here. The `via: 'worker'` variant of the
+//      offline test (transport.spec.ts, test 40) is skipped with this explanation rather than
+//      silently passing on a request that was never actually blocked.
+//   7. `chrome.runtime.reload()` (a real, unmodified extension API, not a hook) unloads the
+//      extension and never re-registers it here — `--load-extension` /
+//      `--disable-extensions-except` are one-time load-at-launch flags in this environment, not
+//      a live-reload watch. Confirmed directly: after reload(), context.serviceWorkers() goes
+//      to zero and a fresh navigation to the extension fails with net::ERR_BLOCKED_BY_CLIENT
+//      even after a 5s wait. Test 13 (process-lifecycle.spec.ts) is skipped with this
+//      explanation.
 //
 // See MEMORY.md's crx-iap-e2e-chrome-quirks entry for the checkpoint-2 findings this confirms;
-// it has been updated with findings 3 and 4 above.
+// it has been updated with findings 3-7 above.
 
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,7 +61,13 @@ import {
   type Page,
   type Worker,
 } from '@playwright/test';
-import type { StandInFetchOutcome, SwRequest } from '../../extension/src/shared/messages.ts';
+import type {
+  CurrentTokenIdOutcome,
+  FailureClass,
+  FetchOutcome,
+  StandInFetchOutcome,
+  SwRequest,
+} from '../../extension/src/shared/messages.ts';
 import { startTestServer, type TestServerHandle } from '../../test-server/src/index.ts';
 import type { RequestLogEntry } from '../../test-server/src/state.ts';
 
@@ -71,7 +90,19 @@ interface Fixtures {
   driver: Driver;
 }
 
-export const test = base.extend<Fixtures>({
+// Test-scoped option (not a fixture value): the token lifecycle (1-9) and transport (40-43)
+// groups run once with via: 'sw' (through IapClient.fetch()'s own classify/retry ladder) and
+// once with via: 'worker' (through the stand-in Worker's DNR-attached request, which has no
+// classification or retry logic of its own — see performFetch below). Every other group is
+// SW-only per PROMPT.md ("those paths are identical in both modes"). Override with
+// `test.use({ via: 'worker' })` inside a describe block.
+interface Options {
+  via: 'sw' | 'worker';
+}
+
+export const test = base.extend<Fixtures & Options>({
+  via: ['sw', { option: true }],
+
   // biome-ignore lint/correctness/noEmptyPattern: Playwright fixtures require this parameter even when unused.
   testServer: async ({}, use) => {
     const server = await startTestServer();
@@ -196,9 +227,125 @@ export async function requestLog(server: TestServerHandle): Promise<RequestLogEn
   return (await response.json()) as RequestLogEntry[];
 }
 
+// Clears all armed scenarios and the request log. Does NOT touch the extension's own
+// chrome.storage cache — a retry after this that still reuses cached discovery/registration
+// state is a real assertion about the client, not a tautology.
+export async function resetServer(server: TestServerHandle): Promise<void> {
+  await fetch(`${server.origins.control}/control/reset`, { method: 'POST' });
+}
+
 // Races a short timeout against the 'page' event so tests can assert "no auth tab opened"
 // without an arbitrary sleep. Set up *before* triggering the action under test, then awaited
 // after — see callers.
 export function watchForPage(context: BrowserContext, withinMs = 2000): Promise<Page | null> {
   return context.waitForEvent('page', { timeout: withinMs }).catch(() => null);
+}
+
+// Always SW-driven, regardless of `via` — the stand-in Worker cannot itself acquire a token
+// (see performFetch's doc comment). Use this to set up the "already logged in" precondition
+// most tests start from before exercising the scenario under test through `performFetch`.
+export async function establishToken(driver: Driver, origin: string): Promise<void> {
+  const outcome = await driver.send<FetchOutcome>({
+    type: 'fetch',
+    resource: `${origin}/api/resource`,
+  });
+  if (!outcome.ok) throw new Error(`establishToken(${origin}) failed: ${JSON.stringify(outcome)}`);
+}
+
+// Real wall-clock wait (not a fake clock — see PROMPT.md's "no clock manipulation" rule,
+// which governs simulating time, not waiting for it). Needed wherever a shortLivedTokens
+// scenario must produce a *genuine* server-side expiry for `via: 'worker'`: the stand-in path
+// has no local-expiry check of its own (that's IapClient.fetch()'s isFresh()/skew-margin logic
+// — see client.ts), so it only ever recovers reactively from a real 401. `via: 'sw'` never
+// needs this: the 60s skew margin already treats a 1s-lifetime token as stale immediately,
+// with no real waiting required.
+export function realSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function currentTokenId(driver: Driver, origin: string): Promise<string | null> {
+  const outcome = await driver.send<CurrentTokenIdOutcome>({
+    type: 'currentTokenId',
+    resource: origin,
+  });
+  return outcome.tokenId;
+}
+
+// Polls currentTokenId until it differs from `previous`, or throws. Used by the 'worker' via
+// mode below, and directly by DNR-attachment tests that need to know a background refresh
+// (triggered by reportRejected) has completed before issuing a follow-up request.
+export async function waitForTokenChange(
+  driver: Driver,
+  origin: string,
+  previous: string | null,
+  timeoutMs = 5000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const id = await currentTokenId(driver, origin);
+    if (id && id !== previous) return id;
+    if (Date.now() > deadline) throw new Error(`tokenId for ${origin} did not change in time`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+export interface ViaOutcome {
+  ok: boolean;
+  status?: number;
+  errorClass?: FailureClass;
+}
+
+/**
+ * Performs one logical fetch through whichever mechanism `via` selects.
+ *
+ * `via: 'sw'` goes through IapClient.fetch()'s own classify/refresh/retry ladder in one call —
+ * a stale or rejected token is recovered transparently, matching PROMPT.md's FetchOutcome.
+ *
+ * `via: 'worker'` goes through the stand-in Worker's DNR-attached request, which has no
+ * classification or retry logic at all (see packages/extension/src/standin/worker.ts and
+ * docs/detecting-failure.md) — a 401 there only triggers `reportRejected`, which refreshes the
+ * token and updates the DNR rule asynchronously. So this helper mirrors what a real caller of
+ * the stand-in library would have to do: on a 401, wait for the token to change and retry.
+ * PROMPT.md documents the DNR rule-update window itself ("a request that 401s and is recovered
+ * by the normal rejection path ... one round trip slower") as exactly one extra round trip —
+ * but `currentTokenId` (what `waitForTokenChange` polls) updates in the SW *before*
+ * `updateSessionRules` is awaited (see service-worker/index.ts's onTokenChanged listener), so a
+ * retry can still land inside that narrower sub-window and 401 again. Bounded retry loop rather
+ * than exactly one, to absorb that without masking a real hang (a bug would still exhaust the
+ * bound and fail loudly). A non-401 failure (e.g. offline) is returned as-is, with no retry —
+ * there is nothing to recover from and no classification to report.
+ *
+ * IMPORTANT: the stand-in Worker never logs in — `reportRejected` is only ever sent when the
+ * offscreen document already has a cached tokenId for the resource (see
+ * docs/detecting-failure.md), so a 401 with *no* prior token is never reported and this will
+ * hang waiting for a token change that's never coming. Establish the initial token via
+ * `establishToken()` (always SW-driven, regardless of `via`) before calling this for the
+ * scenario under test.
+ */
+export async function performFetch(
+  driver: Driver,
+  via: 'sw' | 'worker',
+  origin: string,
+  path: string,
+  opts?: { method?: string },
+): Promise<ViaOutcome> {
+  if (via === 'sw') {
+    const outcome = await driver.send<FetchOutcome>(
+      opts?.method
+        ? { type: 'fetch', resource: `${origin}${path}`, opts: { method: opts.method } }
+        : { type: 'fetch', resource: `${origin}${path}` },
+    );
+    return outcome.ok
+      ? { ok: true, status: outcome.status }
+      : { ok: false, errorClass: outcome.errorClass };
+  }
+
+  let previous = await currentTokenId(driver, origin);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const result = await driver.standInFetch(origin, path, opts?.method);
+    if (!result.ok) return { ok: false };
+    if (result.status !== 401) return { ok: true, status: result.status };
+    previous = await waitForTokenChange(driver, origin, previous);
+  }
+  return { ok: false };
 }

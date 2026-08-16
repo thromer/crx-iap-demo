@@ -73,6 +73,19 @@ describe('authorization ladder', () => {
     const { token } = await client.getToken(server.origins.rsA);
     expect(token).toBeTruthy();
   });
+
+  // Regression test: an access_denied redirect (the IdP authenticated the user but policy
+  // denied) previously propagated as a raw, unclassified oauth4webapi error instead of
+  // FORBIDDEN — see authorize.ts's validateAuthResponse try/catch.
+  it('classifies an access_denied redirect as FORBIDDEN, not a generic failure', async () => {
+    await armScenario(server.origins.control, 'denyAuthorization');
+    const clock = new FakeClock();
+    const { client } = newClient(clock);
+
+    await expect(client.getToken(server.origins.rsA)).rejects.toMatchObject({
+      class: 'FORBIDDEN',
+    });
+  });
 });
 
 describe('single-flight lock', () => {
@@ -266,6 +279,24 @@ describe('the obtained token actually authorizes the resource', () => {
 
     const response = await client.fetch(`${server.origins.rsA}/api/resource`);
     expect(response.status).toBe(200);
+  });
+});
+
+describe('replayable request bodies', () => {
+  // Test 50 of PROMPT.md's e2e matrix ("ReadableStream body -> rejected up front with a clear
+  // error, not silently retried with a consumed stream") cannot be driven through
+  // packages/e2e: the extension's SW message protocol only carries a string body
+  // (FetchOpts.body: string — see packages/extension/src/shared/messages.ts), since a live
+  // ReadableStream can't cross a chrome.runtime.sendMessage boundary via structured clone
+  // anyway. That's Component A's own contract, so it belongs here.
+  it('rejects a ReadableStream body up front with a clear error', async () => {
+    const clock = new FakeClock();
+    const { client } = newClient(clock);
+    const stream = new ReadableStream();
+
+    await expect(
+      client.fetch(`${server.origins.rsA}/api/resource`, { method: 'POST', body: stream }),
+    ).rejects.toMatchObject({ class: 'MISCONFIGURED' });
   });
 });
 

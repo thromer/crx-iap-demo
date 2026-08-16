@@ -12,4 +12,8 @@ export default defineConfig({
   use: {
     trace: 'retain-on-failure',
   },
+  // Test 65 (stallAuthorization over six minutes) is tagged @slow in its title and excluded by
+  // default — it alone would multiply the whole suite's runtime several times over. Run it
+  // explicitly with `npx playwright test --grep @slow`.
+  grepInvert: /@slow/,
 });

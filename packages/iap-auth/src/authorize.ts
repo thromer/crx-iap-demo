@@ -17,12 +17,22 @@ function isTransport(err: unknown): boolean {
 }
 
 function retryAfterMs(err: unknown): number | undefined {
-  if (err instanceof oauth.ResponseBodyError) {
-    const header = err.response.headers.get('retry-after');
-    if (header) {
-      const seconds = Number(header);
-      if (Number.isFinite(seconds)) return seconds * 1000;
-    }
+  // The attempt closures below wrap every non-invalid_grant failure through toIapError before
+  // it reaches withTransportRetry, so by the time it gets here `err` is usually an IapError
+  // with the original oauth.ResponseBodyError as its `.cause` — checking `err instanceof
+  // oauth.ResponseBodyError` directly silently never matched, and Retry-After was never
+  // honored, always falling back to the fixed backoff instead.
+  const responseBodyError =
+    err instanceof oauth.ResponseBodyError
+      ? err
+      : err instanceof IapError && err.cause instanceof oauth.ResponseBodyError
+        ? err.cause
+        : undefined;
+  if (!responseBodyError) return undefined;
+  const header = responseBodyError.response.headers.get('retry-after');
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds)) return seconds * 1000;
   }
   return undefined;
 }
@@ -86,7 +96,33 @@ export async function runAuthorizationLadder(
     redirectUrl = await authorizer.authorize(authUrl.toString(), { interactive: true });
   }
 
-  const callbackParams = oauth.validateAuthResponse(as, client, new URL(redirectUrl), state);
+  // Unclassified until now: an access_denied redirect (the IdP authenticated the user but
+  // policy denied) or a validation failure (tampered state, injected foreign code) both threw
+  // here as a raw oauth4webapi error, propagating past classify() as UNKNOWN instead of
+  // FORBIDDEN/MISCONFIGURED. access_denied is specifically NOT a generic misconfiguration —
+  // PROMPT.md's classification table requires it distinguishable from an authentication
+  // failure, and callers must never retry or prompt again for either case.
+  let callbackParams: URLSearchParams;
+  try {
+    callbackParams = oauth.validateAuthResponse(as, client, new URL(redirectUrl), state);
+  } catch (err) {
+    if (err instanceof oauth.AuthorizationResponseError && err.error === 'access_denied') {
+      logger.info('classify', 'FORBIDDEN: access_denied on the authorization redirect', {
+        resource,
+        correlationId,
+      });
+      throw new IapError(
+        'FORBIDDEN',
+        `authorization denied by policy: ${err.error_description ?? err.error}`,
+      );
+    }
+    logger.error('classify', 'MISCONFIGURED: authorization response validation failed', {
+      resource,
+      correlationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw toIapError(err, 'authorization response validation');
+  }
 
   logger.debug('token', 'exchanging authorization code', { resource, correlationId });
   const tokenResponse = await withTransportRetry(

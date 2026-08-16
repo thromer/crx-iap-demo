@@ -49,8 +49,10 @@ const scenarioHandlers: Record<string, (args: ScenarioArgs) => void> = {
   revokeGrant: () => {
     state.scenarios.revokeGrant = true;
   },
-  unprotected: () => {
-    state.scenarios.unprotected = true;
+  // Accepts an optional `on` flag, like rotateRefreshTokens, so a test can flip protection
+  // back on mid-session (PROMPT.md test matrix #16/#17 require both transition directions).
+  unprotected: (args) => {
+    state.scenarios.unprotected = bool(args, 'on', true);
   },
   appLevel401: (args) => {
     const kind = str(args, 'kind');
@@ -82,6 +84,11 @@ const scenarioHandlers: Record<string, (args: ScenarioArgs) => void> = {
   },
   noRegistrationEndpoint: () => {
     state.scenarios.noRegistrationEndpoint = true;
+  },
+  // Missing from the original registry — needed for test matrix #52 (logout against an AS with
+  // no revocation_endpoint must resolve cleanly rather than throw or no-op silently).
+  noRevocationEndpoint: () => {
+    state.scenarios.noRevocationEndpoint = true;
   },
   malformedMetadata: (args) => {
     const kind = str(args, 'kind');

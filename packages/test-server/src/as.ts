@@ -101,12 +101,14 @@ function serveRfc8414Metadata(res: ServerResponse): void {
     issuer,
     authorization_endpoint: `${ORIGINS.as}${ROUTES.authorization}`,
     token_endpoint: `${ORIGINS.as}${ROUTES.token}`,
-    revocation_endpoint: `${ORIGINS.as}${ROUTES.revocation}`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: ['none'],
   };
+  if (!state.scenarios.noRevocationEndpoint) {
+    doc['revocation_endpoint'] = `${ORIGINS.as}${ROUTES.revocation}`;
+  }
   if (!state.scenarios.noRegistrationEndpoint) {
     doc['registration_endpoint'] = `${ORIGINS.as}${ROUTES.registration}`;
   }

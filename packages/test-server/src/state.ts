@@ -36,6 +36,7 @@ export interface ScenarioState {
   emptyAuthorizationServers: boolean;
   multipleAuthorizationServers: boolean;
   noRegistrationEndpoint: boolean;
+  noRevocationEndpoint: boolean;
   malformedMetadata:
     | { kind: MalformedMetadataKind; target: 'resourceMetadata' | 'asMetadata' }
     | undefined;
@@ -72,6 +73,7 @@ export function defaultScenarioState(): ScenarioState {
     emptyAuthorizationServers: false,
     multipleAuthorizationServers: false,
     noRegistrationEndpoint: false,
+    noRevocationEndpoint: false,
     malformedMetadata: undefined,
 
     autoApprove: true,
