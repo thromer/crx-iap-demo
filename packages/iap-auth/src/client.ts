@@ -250,6 +250,12 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
   }
 
   return {
+    // In the extension, a declarativeNetRequest rule attaches the same Authorization header
+    // to every matching request from this extension — including this call. Normally both
+    // carry the same value; during a refresh window they can diverge, and DNR's `set` wins
+    // over whatever is attached here. That's the safe outcome, since the rule is only ever
+    // updated to the current token — see the matching note next to where the rule is
+    // installed (packages/extension/src/service-worker/dnr.ts).
     async fetch(input, init) {
       const correlationId = newCorrelationId();
       const url = new URL(input);

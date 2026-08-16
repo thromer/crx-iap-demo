@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>IAP Auth Demo</title>
+    <style>
+      body {
+        font: 13px system-ui, sans-serif;
+        width: 340px;
+        padding: 10px;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 4px;
+        margin-bottom: 8px;
+      }
+      .buttons {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      button {
+        flex: 1;
+        padding: 6px;
+      }
+      pre {
+        background: #f4f4f4;
+        padding: 6px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 220px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <input id="url" type="text" placeholder="https://localhost:4020/api/resource" />
+    <div class="buttons">
+      <button id="fetch" type="button">Fetch</button>
+      <button id="login" type="button">Login</button>
+      <button id="logout" type="button">Logout</button>
+    </div>
+    <pre id="status">No action yet.</pre>
+    <script type="module" src="/src/popup/popup.ts"></script>
+  </body>
+</html>

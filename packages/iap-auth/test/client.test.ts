@@ -240,3 +240,31 @@ describe('rotation handling', () => {
     expect(secondRefreshToken).toBe(firstRefreshToken);
   });
 });
+
+describe('the obtained token actually authorizes the resource', () => {
+  // A token endpoint returning 200 with a syntactically valid access_token is not proof the
+  // token is USABLE — a wrong audience, wrong scope, etc. would still show up here as a 401
+  // from the resource server. Assert against the RS directly rather than only against
+  // internal state, or a bug like this can hide behind every other test in this file.
+  it('a fresh token from getToken() is accepted by the resource server', async () => {
+    const clock = new FakeClock();
+    const { client } = newClient(clock);
+
+    await client.getToken(server.origins.rsA);
+    const response = await client.fetch(`${server.origins.rsA}/api/resource`);
+
+    expect(response.status).toBe(200);
+  });
+
+  it('a refreshed token is also accepted by the resource server', async () => {
+    const clock = new FakeClock();
+    const { client } = newClient(clock);
+
+    await client.getToken(server.origins.rsA);
+    clock.advance(2 * 60 * 60 * 1000);
+    await client.getToken(server.origins.rsA); // forces a refresh
+
+    const response = await client.fetch(`${server.origins.rsA}/api/resource`);
+    expect(response.status).toBe(200);
+  });
+});

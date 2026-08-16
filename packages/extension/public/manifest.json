@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "IAP Auth Demo",
+  "version": "0.0.0",
+  "description": "Demonstrates a generic, standards-based OAuth client for resources behind an identity-aware proxy.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyxYZZZWnK+zDEkhy6nGUgoTE6wgitfLbCT94y7d0bR9u2bkIhjjTus2edqRJPlUFoIgxLGgsSAtv4XouQp9gyfY56f29Gn6EJmnCMu507c25QYlka+zOObzQIWhEPFu+JTaYkwWHUPqrVb7TlBUy1Qi9t+RYwMPle8aTCnZyxs+mLOqN6iUQ05JMAMi2OgwJj2NXJaaJYTVHfQM3dXTJx2xEYfrrpPXWpx+lGzBU/MB6sEkBAIt+5OJmMXSTpVCka5V0pe3axdE+zXxs9cJLZUgtTCu1RwNx7Sy9soCCAMadJa37fnCeZlo5cOP9egZr3m1jyb7pJDyeSd3oAp4sQwIDAQAB",
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "permissions": ["identity", "storage", "offscreen", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": [
+    "https://localhost:4010/*",
+    "https://localhost:4020/*",
+    "https://localhost:4021/*",
+    "https://api.example.com/*"
+  ]
+}

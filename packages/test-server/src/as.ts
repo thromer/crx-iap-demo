@@ -54,6 +54,11 @@ function buildConfiguration(): Configuration {
       AccessToken: () => state.scenarios.shortLivedTokensSeconds ?? 3600,
     },
     rotateRefreshToken: () => state.scenarios.rotateRefreshTokens,
+    // A native-app client (RFC 8252) exchanges its code from its own origin — for a Chrome
+    // extension, chrome-extension://<id> — not from a page at the redirect_uri's origin, so
+    // oidc-provider's default heuristic (matching Origin against registered redirect_uris)
+    // never allows it. Any origin is fine for a public client on a test double.
+    clientBasedCORS: () => true,
     interactions: {
       url: (_ctx, interaction) => `/interaction/${interaction.uid}`,
     },

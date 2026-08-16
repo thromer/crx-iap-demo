@@ -20,10 +20,17 @@ function classify(err: unknown): 'transport' | 'misconfigured' | 'other' {
   return 'other';
 }
 
+function describe(err: unknown): string {
+  if (err instanceof oauth.ResponseBodyError) {
+    return err.error_description ? `${err.error}: ${err.error_description}` : err.error;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function toIapError(err: unknown, context: string): IapError {
   if (err instanceof IapError) return err;
   const kind = classify(err);
-  const message = err instanceof Error ? err.message : String(err);
+  const message = describe(err);
   if (kind === 'transport') {
     return new IapError('TRANSPORT', `${context}: transport failure (${message})`, { cause: err });
   }

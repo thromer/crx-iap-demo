@@ -75,6 +75,7 @@ declare module 'oidc-provider' {
       AccessToken?: number | ((ctx: KoaContext, token: unknown, client: unknown) => number);
     };
     rotateRefreshToken?: boolean | ((ctx: KoaContext) => boolean | Promise<boolean>);
+    clientBasedCORS?: (ctx: KoaContext, origin: string, client: unknown) => boolean;
     interactions?: {
       url?: (ctx: KoaContext, interaction: InteractionDetails) => Promise<string> | string;
     };

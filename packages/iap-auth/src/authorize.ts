@@ -105,7 +105,11 @@ export async function runAuthorizationLadder(
           callbackParams,
           redirectUri,
           codeVerifier,
-          { signal: requestSignal() },
+          // RFC 8707: resending `resource` at the token request is what lets the AS bind the
+          // audience even when scope also includes `openid` — without it, oidc-provider (and
+          // likely others) may fall back to resolving no resource at all, minting a
+          // token whose audience doesn't match any resource server.
+          { signal: requestSignal(), additionalParameters: { resource } },
         );
       } catch (err) {
         throw toIapError(err, 'authorization code exchange');
