@@ -1,0 +1,14 @@
+{
+  "name": "@iap-demo/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pretest": "yarn workspace @iap-demo/extension build",
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  }
+}

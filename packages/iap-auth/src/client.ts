@@ -286,7 +286,22 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
         }
       }
 
-      const first = await issueResourceRequest(method, url, buildHeaders(), body, token);
+      // A network-level failure here (offline, connection refused, DNS, TLS) throws a raw
+      // TypeError from fetch — never routed through toIapError before, so classify() in the
+      // extension's message handler fell through to UNKNOWN instead of TRANSPORT. Caught here
+      // rather than deeper in issueResourceRequest, since that helper is also used by probe(),
+      // which classifies its own failures differently.
+      let first: Awaited<ReturnType<typeof issueResourceRequest>>;
+      try {
+        first = await issueResourceRequest(method, url, buildHeaders(), body, token);
+      } catch (err) {
+        logger.error('classify', 'TRANSPORT: resource request failed', {
+          resource,
+          correlationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw toIapError(err, 'resource request');
+      }
 
       if (first.response.status === 403) {
         logger.info('classify', 'FORBIDDEN', { resource, correlationId });
@@ -327,8 +342,17 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
         ),
       );
 
-      const retry = await issueResourceRequest(method, url, buildHeaders(), body, entry.token);
-      return retry.response;
+      try {
+        const retry = await issueResourceRequest(method, url, buildHeaders(), body, entry.token);
+        return retry.response;
+      } catch (err) {
+        logger.error('classify', 'TRANSPORT: resource request (retry) failed', {
+          resource,
+          correlationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw toIapError(err, 'resource request retry');
+      }
     },
 
     async probe(resource): Promise<ProbeResult> {

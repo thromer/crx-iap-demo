@@ -268,3 +268,19 @@ describe('the obtained token actually authorizes the resource', () => {
     expect(response.status).toBe(200);
   });
 });
+
+describe('transport classification on fetch()', () => {
+  // Regression test: fetch()'s own request to the resource server previously let a raw
+  // fetch-level TypeError (offline, connection refused, DNS, TLS) escape unwrapped, so it
+  // never reached toIapError and was misclassified as UNKNOWN rather than TRANSPORT by callers
+  // that only recognize IapError. Caught via the e2e suite's offline test (packages/e2e's
+  // transport.spec.ts, test 40) before this regression test existed.
+  it('a connection failure on the resource request itself classifies as TRANSPORT', async () => {
+    const clock = new FakeClock();
+    const { client } = newClient(clock);
+
+    await expect(client.fetch('https://localhost:1/api/resource')).rejects.toMatchObject({
+      class: 'TRANSPORT',
+    });
+  });
+});

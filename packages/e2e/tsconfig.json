@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
+    "types": ["node", "chrome"],
+    "noEmit": true
+  },
+  "include": ["src", "tests", "playwright.config.ts", "../test-server/src/oidc-provider.d.ts"]
+}

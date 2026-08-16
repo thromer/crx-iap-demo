@@ -23,6 +23,15 @@ node_modules
 #!.yarn/cache
 .pnp.*
 
+## Playwright
+
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+.tmp-profile*/
+.tmp-spike/
+
 ## Editors / IDEs
 
 *~

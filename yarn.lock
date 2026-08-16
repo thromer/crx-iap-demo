@@ -278,6 +278,14 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@iap-demo/e2e@workspace:packages/e2e":
+  version: 0.0.0-use.local
+  resolution: "@iap-demo/e2e@workspace:packages/e2e"
+  dependencies:
+    "@playwright/test": "npm:^1.62.1"
+  languageName: unknown
+  linkType: soft
+
 "@iap-demo/extension@workspace:packages/extension":
   version: 0.0.0-use.local
   resolution: "@iap-demo/extension@workspace:packages/extension"
@@ -362,6 +370,17 @@ __metadata:
   version: 0.144.0
   resolution: "@oxc-project/types@npm:0.144.0"
   checksum: 10c0/997c6c33f09706af604ece0e99c698965757887aca4b42c5fb5ddcb11c39876c1e824b188b1e6582276355468a9b13f955d3b822d3b532cd6bedbeb64b603ff0
+  languageName: node
+  linkType: hard
+
+"@playwright/test@npm:^1.62.1":
+  version: 1.62.1
+  resolution: "@playwright/test@npm:1.62.1"
+  dependencies:
+    playwright: "npm:1.62.1"
+  bin:
+    playwright: cli.js
+  checksum: 10c0/4b76f2f717723f84a73601f74fde97f5d92e4b5c869cf87c0f5628bf247fa1d18c9dc6c8e136463303233239e8ce58f902513d4281a9fabc3c426e911ded2c83
   languageName: node
   linkType: hard
 
@@ -1971,7 +1990,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"playwright@npm:^1.62.1":
+"playwright@npm:1.62.1, playwright@npm:^1.62.1":
   version: 1.62.1
   resolution: "playwright@npm:1.62.1"
   dependencies:
