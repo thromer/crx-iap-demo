@@ -1,0 +1,20 @@
+{
+  "name": "@iap-demo/iap-auth",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "oauth4webapi": "^3.8.7"
+  },
+  "devDependencies": {
+    "undici": "^8.10.0",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "WebWorker"],
+    "types": [],
+    "noEmit": true
+  },
+  "include": ["src", "test", "../test-server/src/oidc-provider.d.ts"]
+}
