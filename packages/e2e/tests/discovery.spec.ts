@@ -51,14 +51,24 @@ test('16: a resource that becomes protected mid-session runs the flow on the nex
 
 // Test 17: protected -> unprotected mid-session -> no Authorization header sent.
 //
-// Deliberately does NOT call establishToken() first. fetch() is architecturally optimistic
-// (PROMPT.md: "it must never pre-probe") — it attaches whatever cached token already exists
-// for a resource without checking current protection status first, so a resource this client
-// already has a cached token for would keep sending that (harmless but real) header after
-// flipping unprotected; the unprotected branch in rs.ts answers 200 regardless and never even
-// inspects it. The behavior this test actually verifies — the client never attaches a header
-// it has no cached token to attach — needs a resource with no prior cached state, exactly as
-// it would be the first time this client ever encounters it after the flip.
+// Deliberately does NOT call establishToken() first. A 200 with no challenge is only
+// unambiguous evidence of "unprotected" when it comes back to a *credential-free* request —
+// that's exactly what this test and test 15/16 exercise. Once a token is already cached and
+// attached, the same 200-with-no-challenge response is indistinguishable, over HTTP, from
+// "still protected, and this token happens to still be valid" — nothing in the response tells
+// the client which case it's in. See docs/checkpoint-3-disclosure.md ("test 17 scope") for the
+// full writeup, including a concrete mutation-tested attempt at the broader version: treating
+// any clean 2xx-with-attached-token as unprotected evidence fires on every ordinary successful
+// authenticated request too, dropping a still-valid token after each one and forcing a full
+// reauth on the very next request — which then succeeds and gets dropped again, forever. That
+// isn't a missed edge case to special-case away; it's the only signal available, and it's
+// structurally unable to tell the two situations apart. So the client leaves a stale cached
+// entry in place when a resource flips to unprotected mid-session; the entry is never
+// consulted by anything the unprotected branch does (rs.ts's unprotected handler answers 200
+// unconditionally, before it ever looks at the header) and never causes an incorrect request.
+// The behavior this test actually verifies — the client never attaches a header it has no
+// cached token to attach — needs a resource with no prior cached state, exactly as it would be
+// the first time this client ever encounters it after the flip.
 test('17: a resource that becomes unprotected mid-session is fetched with no Authorization header', async ({
   testServer,
   driver,

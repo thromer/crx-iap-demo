@@ -348,9 +348,14 @@ authorizer adapter is a single-shot wrapper over `launchWebAuthFlow` with no lad
   completed. A partially fetched metadata document or unconfirmed `client_id` must never be
   persisted, or a transient failure poisons the install permanently. Registration runs once per
   install per AS, not per login.
-- **Unprotected endpoints.** A resource returning 200 with no challenge is unprotected: plain
-  request, no `Authorization`, no discovery traffic, no prompt. Handle transitions both ways
-  mid-session.
+- **Unprotected endpoints.** A resource returning 200 with no challenge to a credential-free
+  request is unprotected: plain request, no `Authorization`, no discovery traffic, no prompt.
+  Handle the unprotected → protected transition mid-session (the next `fetch` simply runs the
+  flow). The reverse transition is not handleable the same way: once a token is already cached
+  and attached, a 200 with no challenge is indistinguishable from "still protected, and this
+  token is still valid" — nothing in the response tells you which. Don't attempt to detect it
+  from response shape; a cached token left behind by a resource that quietly stopped requiring
+  auth is inert, never consulted by anything the unprotected path does.
 - **A 401 is not automatically an IAP challenge.** An unprotected-by-IAP resource may return
   `401` for its own reasons — `WWW-Authenticate: Basic`, a bare 401, a JSON API error. None
   may trigger discovery or a prompt. Only a `Bearer` challenge carrying `resource_metadata`
@@ -614,7 +619,8 @@ explicitly. "No prompt" means asserting no page event fires.
 **Discovery**
 15. `unprotected` → 200, zero `.well-known` requests, zero AS traffic, no prompt.
 16. `unprotected` → `protected` mid-session → next `fetch` runs the flow and succeeds.
-17. `protected` → `unprotected` mid-session → no `Authorization` header sent.
+17. `protected` → `unprotected` mid-session, no prior cached token for this resource → no
+    `Authorization` header sent.
 18. `appLevel401('basic')` → 401 returned verbatim. Zero `.well-known` requests, zero AS
     traffic, no prompt. A `Basic` challenge must never be mistaken for an IAP challenge.
 19. `appLevel401('bare')` and `appLevel401('json')` → same, per variant.
