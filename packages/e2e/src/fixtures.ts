@@ -20,9 +20,13 @@
 //   3. After `ServiceWorker.stopAllWorkers` succeeds, `context.serviceWorkers()` does not shrink
 //      here — it keeps listing the dead worker — and PROMPT.md's claim that a dead handle's
 //      `evaluate()` "throws" doesn't hold either: it hangs indefinitely instead of rejecting.
-//      `stopServiceWorker()` below therefore verifies termination by racing the old handle's
-//      `evaluate()` against a short timeout and treating the timeout itself as confirmation,
-//      rather than asserting on `serviceWorkers()` length or awaiting a rejection.
+//      An earlier version of `stopServiceWorker()` below raced the old handle's `evaluate()`
+//      against a 1500ms timeout and treated the timeout as confirmation — which the
+//      checkpoint-3 review correctly flagged as vacuous: since evaluate() always hangs rather
+//      than rejecting, that race's timeout branch always won regardless of whether the worker
+//      had actually stopped. Replaced with CDP `Target.getTargets`, polled — direction-validated
+//      (confirmed the service_worker target both disappears on stop and reappears on wake) —
+//      see `stopServiceWorker`'s own doc comment below.
 //   4. PROMPT.md's `wakeWorker()` recipe — open popup.html, wait for a fresh 'serviceworker'
 //      event — does not work here: this extension's popup only reads chrome.storage on load
 //      (see src/popup/popup.ts), never sends a chrome.runtime message, and merely loading a
@@ -162,23 +166,52 @@ export const test = base.extend<Fixtures & Options>({
     await use(wake);
   },
 
-  // Stops the given worker handle via CDP and confirms it. See the module header (finding 3):
-  // context.serviceWorkers() does not shrink here and evaluate() on the dead handle hangs
-  // rather than rejecting, so termination is confirmed by racing a trivial evaluate() against
-  // a short timeout and treating the timeout as confirmation.
+  // Stops the given worker handle via CDP and confirms it actually stopped.
+  //
+  // Checkpoint-3 review, Task 5 (the most serious finding in that review): the previous
+  // version raced `worker.evaluate(() => 1)` against a 1500ms timeout and treated the timeout
+  // as confirmation of death. But finding 3 above already establishes that evaluate() on a
+  // dead handle *hangs* rather than rejecting — which means that race's timeout branch always
+  // won, regardless of whether the worker actually stopped. `stillAlive` was always `false`.
+  // The check could not fail; tests 10 and 11 could not have detected stopAllWorkers silently
+  // doing nothing.
+  //
+  // Replaced with CDP `Target.getTargets`, polled rather than a fixed wait — validated
+  // directly in both directions before use, not assumed: launched a real extension, confirmed
+  // its `service_worker` target is present in `Target.getTargets()`, called
+  // `ServiceWorker.stopAllWorkers`, and confirmed the target disappears (in this environment,
+  // within ~1ms — no discovery mode needed, a bare `Target.getTargets` call reflects it
+  // immediately); then wakes it via a message and confirms the *same* target id reappears.
+  // Both directions genuinely flip the result, unlike the check this replaces.
   stopServiceWorker: async ({ extensionContext }, use) => {
     const stop = async (worker: Worker): Promise<void> => {
+      const workerUrl = worker.url();
       const page = await extensionContext.newPage();
       const session = await extensionContext.newCDPSession(page);
       await session.send('ServiceWorker.enable');
       await session.send('ServiceWorker.stopAllWorkers');
-      await page.close();
 
-      const stillAlive = await Promise.race([
-        worker.evaluate(() => 1).then(() => true),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1500)),
-      ]);
-      if (stillAlive) throw new Error('service worker did not stop within 1500ms');
+      const deadline = Date.now() + 3000;
+      let stopped = false;
+      while (Date.now() < deadline) {
+        const { targetInfos } = (await session.send('Target.getTargets')) as {
+          targetInfos: { type: string; url: string }[];
+        };
+        const stillPresent = targetInfos.some(
+          (t) => t.type === 'service_worker' && t.url === workerUrl,
+        );
+        if (!stillPresent) {
+          stopped = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      await page.close();
+      if (!stopped) {
+        throw new Error(
+          `service worker did not stop within 3000ms (Target.getTargets still lists ${workerUrl})`,
+        );
+      }
     };
     await use(stop);
   },
