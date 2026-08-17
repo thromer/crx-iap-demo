@@ -1,7 +1,7 @@
 import * as oauth from 'oauth4webapi';
 import { toIapError } from './errors.ts';
 import { asMetadataKey, clientRegistrationKey, resourceMetadataKey } from './keys.ts';
-import { requestSignal, withTransportRetry } from './net.ts';
+import { requestSignal, transportCustomFetch, transportFetch, withTransportRetry } from './net.ts';
 import type { KeyValueStore, Logger } from './types.ts';
 import { IapError } from './types.ts';
 
@@ -30,6 +30,14 @@ async function retryDiscovery<T>(
  * `resource_metadata` parameter (already parsed by oauth4webapi, never hand-parsed here).
  * Rejects a `resource_metadata` URL on a foreign origin without ever requesting it — this is
  * the RFC 9728 spoofing defense and it happens before any network call.
+ *
+ * Deliberately does NOT use oauth4webapi's `resourceDiscoveryRequest` primitive: that function
+ * takes the resource identifier and derives the well-known metadata URL itself, with no way to
+ * hand it the exact URL the server's challenge named. That would bypass the origin check above
+ * entirely (it would just never look at a foreign resource_metadata value in the first place)
+ * rather than validate-then-reject it — a materially different security property, and the one
+ * this project's own crossOriginResourceMetadata test (#23) is specifically written against.
+ * The request itself still goes through this module's one transportFetch chokepoint.
  */
 export async function discoverResource(
   resource: string,
@@ -61,13 +69,12 @@ export async function discoverResource(
   }
 
   logger.debug('discovery', 'fetching resource metadata', { url: metadataUrl.href, correlationId });
+  const fetchResourceMetadata = transportFetch('resource metadata fetch');
   const metadata = await retryDiscovery(logger, correlationId, async () => {
-    let response: Response;
-    try {
-      response = await fetch(metadataUrl, { redirect: 'manual', signal: requestSignal() });
-    } catch (err) {
-      throw toIapError(err, 'resource metadata fetch');
-    }
+    const response = await fetchResourceMetadata(metadataUrl, {
+      redirect: 'manual',
+      signal: requestSignal(),
+    });
     try {
       return await oauth.processResourceDiscoveryResponse(resourceUrl, response);
     } catch (err) {
@@ -105,15 +112,11 @@ export async function discoverAuthorizationServer(
   logger.debug('discovery', 'fetching AS metadata', { issuer, correlationId });
   const issuerUrl = new URL(issuer);
   const as = await retryDiscovery(logger, correlationId, async () => {
-    let response: Response;
-    try {
-      response = await oauth.discoveryRequest(issuerUrl, {
-        algorithm: 'oauth2',
-        signal: requestSignal(),
-      });
-    } catch (err) {
-      throw toIapError(err, 'AS metadata fetch');
-    }
+    const response = await oauth.discoveryRequest(issuerUrl, {
+      algorithm: 'oauth2',
+      signal: requestSignal(),
+      [oauth.customFetch]: transportCustomFetch('AS metadata fetch'),
+    });
     try {
       return await oauth.processDiscoveryResponse(issuerUrl, response);
     } catch (err) {
@@ -160,21 +163,19 @@ export async function registerOrGetClient(
 
   logger.debug('dcr', 'registering client', { issuer: as.issuer, correlationId });
   const client = await retryDiscovery(logger, correlationId, async () => {
-    let response: Response;
-    try {
-      response = await oauth.dynamicClientRegistrationRequest(
-        as,
-        {
-          token_endpoint_auth_method: 'none',
-          redirect_uris: [redirectUri],
-          grant_types: ['authorization_code', 'refresh_token'],
-          response_types: ['code'],
-        },
-        { signal: requestSignal() },
-      );
-    } catch (err) {
-      throw toIapError(err, 'dynamic client registration');
-    }
+    const response = await oauth.dynamicClientRegistrationRequest(
+      as,
+      {
+        token_endpoint_auth_method: 'none',
+        redirect_uris: [redirectUri],
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+      },
+      {
+        signal: requestSignal(),
+        [oauth.customFetch]: transportCustomFetch('dynamic client registration'),
+      },
+    );
     try {
       return await oauth.processDynamicClientRegistrationResponse(response);
     } catch (err) {

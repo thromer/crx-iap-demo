@@ -2,6 +2,7 @@ import { Agent, setGlobalDispatcher } from 'undici';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startTestServer, type TestServerHandle } from '../../test-server/src/index.ts';
 import { createIapClient } from '../src/index.ts';
+import { accessKey, refreshKey } from '../src/keys.ts';
 import {
   createHttpAuthorizer,
   createLadderTestAuthorizer,
@@ -313,5 +314,61 @@ describe('transport classification on fetch()', () => {
     await expect(client.fetch('https://localhost:1/api/resource')).rejects.toMatchObject({
       class: 'TRANSPORT',
     });
+  });
+});
+
+describe('logout()', () => {
+  // Checkpoint-3 review, Task 4: a revocation that succeeds must be distinguishable from one
+  // that was attempted and failed — both clear local state and resolve without throwing, but
+  // only a confirmed revocation reports revoked: true.
+  it('revokes at the AS and reports revoked: true', async () => {
+    const clock = new FakeClock();
+    const { client, durable, session } = newClient(clock);
+    await client.getToken(server.origins.rsA);
+
+    const before = await countRequests(
+      server.origins.control,
+      (e) => e.server === 'as' && e.path === '/token/revocation',
+    );
+    const result = await client.logout(server.origins.rsA);
+    const after = await countRequests(
+      server.origins.control,
+      (e) => e.server === 'as' && e.path === '/token/revocation',
+    );
+
+    expect(result).toEqual({ revoked: true });
+    expect(after - before).toBe(1);
+
+    // Local state cleared: no access token cached, no refresh token to fall back on. (Not
+    // asserted via a subsequent getToken() call: the fake HTTP authorizer used in this suite
+    // doesn't distinguish interactive from non-interactive — unlike a real browser, it always
+    // completes the flow — so a post-logout getToken() would silently re-authorize rather than
+    // reveal a cleared state.)
+    expect(await session.get(accessKey(server.origins.rsA))).toBeUndefined();
+    expect(await durable.get(refreshKey(server.origins.rsA))).toBeUndefined();
+  });
+
+  // Missing from the original scenario registry — added for this test (see
+  // packages/test-server's state.ts/control.ts/as.ts: UnreachableEndpoint now includes
+  // 'revocation').
+  it('a failed revocation attempt still clears local state, resolves, and reports revoked: false', async () => {
+    const clock = new FakeClock();
+    const { client, durable, session } = newClient(clock);
+    await client.getToken(server.origins.rsA);
+
+    await armScenario(server.origins.control, 'endpointUnreachable', { which: 'revocation' });
+    const result = await client.logout(server.origins.rsA);
+
+    expect(result).toEqual({ revoked: false });
+    expect(await session.get(accessKey(server.origins.rsA))).toBeUndefined();
+    expect(await durable.get(refreshKey(server.origins.rsA))).toBeUndefined();
+  });
+
+  it('a resource never logged in to has no revocation_endpoint call and reports revoked: false', async () => {
+    const clock = new FakeClock();
+    const { client } = newClient(clock);
+
+    const result = await client.logout(server.origins.rsA);
+    expect(result).toEqual({ revoked: false });
   });
 });

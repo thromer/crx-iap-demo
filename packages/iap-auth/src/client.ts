@@ -6,7 +6,7 @@ import { shortHash } from './hash.ts';
 import { accessKey, refreshKey, resourceMetadataKey } from './keys.ts';
 import { KeyedSingleFlight } from './lock.ts';
 import { createLogger } from './logger.ts';
-import { requestSignal } from './net.ts';
+import { requestSignal, transportCustomFetch } from './net.ts';
 import { issueResourceRequest } from './resource-request.ts';
 import type {
   Clock,
@@ -286,22 +286,11 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
         }
       }
 
-      // A network-level failure here (offline, connection refused, DNS, TLS) throws a raw
-      // TypeError from fetch — never routed through toIapError before, so classify() in the
-      // extension's message handler fell through to UNKNOWN instead of TRANSPORT. Caught here
-      // rather than deeper in issueResourceRequest, since that helper is also used by probe(),
-      // which classifies its own failures differently.
-      let first: Awaited<ReturnType<typeof issueResourceRequest>>;
-      try {
-        first = await issueResourceRequest(method, url, buildHeaders(), body, token);
-      } catch (err) {
-        logger.error('classify', 'TRANSPORT: resource request failed', {
-          resource,
-          correlationId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        throw toIapError(err, 'resource request');
-      }
+      // A network-level failure here (offline, connection refused, DNS, TLS) is classified as
+      // TRANSPORT by issueResourceRequest itself (routed through net.ts's transportFetch) — not
+      // caught here. That's the single chokepoint now; every issueResourceRequest caller
+      // inherits it, including ensureDiscoveryContext() and probe() below.
+      const first = await issueResourceRequest(method, url, buildHeaders(), body, token);
 
       if (first.response.status === 403) {
         logger.info('classify', 'FORBIDDEN', { resource, correlationId });
@@ -342,17 +331,8 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
         ),
       );
 
-      try {
-        const retry = await issueResourceRequest(method, url, buildHeaders(), body, entry.token);
-        return retry.response;
-      } catch (err) {
-        logger.error('classify', 'TRANSPORT: resource request (retry) failed', {
-          resource,
-          correlationId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        throw toIapError(err, 'resource request retry');
-      }
+      const retry = await issueResourceRequest(method, url, buildHeaders(), body, entry.token);
+      return retry.response;
     },
 
     async probe(resource): Promise<ProbeResult> {
@@ -401,11 +381,16 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
 
     async logout(resource) {
       const correlationId = newCorrelationId();
-      await singleFlight.run(resource, correlationId, async () => {
+      return await singleFlight.run(resource, correlationId, async () => {
         const cachedResourceMeta = (await durable.get(resourceMetadataKey(resource))) as
           | { issuer: string }
           | undefined;
         const refreshToken = (await durable.get(refreshKey(resource))) as string | undefined;
+
+        // `revoked` is the only thing that distinguishes "nothing to revoke" from "revocation
+        // was attempted and failed" for the caller — both clear local state and resolve
+        // without throwing, but only a genuine confirmed revocation sets this true.
+        let revoked = false;
 
         if (cachedResourceMeta && refreshToken) {
           try {
@@ -426,9 +411,11 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
               );
               const res = await oauth.revocationRequest(as, client, oauth.None(), refreshToken, {
                 signal: requestSignal(),
+                [oauth.customFetch]: transportCustomFetch('token revocation'),
               });
               await oauth.processRevocationResponse(res);
               logger.info('token', 'revoked at authorization server', { resource, correlationId });
+              revoked = true;
             } else {
               logger.info('token', 'no revocation_endpoint; clearing local state only', {
                 resource,
@@ -436,7 +423,7 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
               });
             }
           } catch (err) {
-            logger.warn('token', 'revocation failed; clearing local state anyway', {
+            logger.warn('token', 'revocation attempted but failed; clearing local state anyway', {
               resource,
               correlationId,
               error: err instanceof Error ? err.message : String(err),
@@ -446,6 +433,7 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
 
         await durable.delete(refreshKey(resource));
         await writeAccessEntry(resource, null, correlationId);
+        return { revoked };
       });
     },
 

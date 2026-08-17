@@ -250,7 +250,14 @@ for (const via of ['sw', 'worker'] as const) {
       const tokenRequests = after
         .slice(before.length)
         .filter((e) => e.server === 'as' && e.path === '/token');
-      expect(tokenRequests).toHaveLength(2);
+      if (via === 'sw') {
+        expect(tokenRequests).toHaveLength(2);
+      } else {
+        // Same documented tokenId-echo tradeoff as test 8's worker variant (see the comment
+        // there): under concurrency, each of the two resources' refreshes can independently
+        // pick up one extra refresh from the same race. Bounded per-resource, not per-caller.
+        expect(tokenRequests.length).toBeLessThanOrEqual(4);
+      }
     });
   });
 }

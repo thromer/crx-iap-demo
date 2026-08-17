@@ -1,6 +1,6 @@
 import * as oauth from 'oauth4webapi';
 import { toIapError } from './errors.ts';
-import { requestSignal, withTransportRetry } from './net.ts';
+import { requestSignal, transportCustomFetch, withTransportRetry } from './net.ts';
 import type { Authorizer, Logger } from './types.ts';
 import { IapError } from './types.ts';
 
@@ -14,6 +14,63 @@ export interface TokenResult {
 
 function isTransport(err: unknown): boolean {
   return toIapError(err, '').class === 'TRANSPORT';
+}
+
+// Classifies a rejection from Authorizer#authorize() — real chrome.identity.launchWebAuthFlow
+// error strings, confirmed empirically against real Chrome rather than assumed from
+// documentation (checkpoint-3 review, Task 3): a silent attempt with no usable session rejects
+// with a message starting "User interaction required." (routine — the caller is the one who
+// forbade escalation, via `interactive: false`, not the module); an interactive attempt the
+// user closes or explicitly denies rejects with "The user did not approve access." (Chrome
+// does not distinguish those two cases at the API level, and there is no reason to either —
+// both mean "no grant, don't ask again unprompted"). Anything else is a genuinely unrecognized
+// rejection — including e.g. "another flow is already running," which was not reproducible
+// under test in the time available to confirm its exact wording — and is deliberately left
+// unclassified here: it propagates as-is, and the extension's message-layer classify()
+// (packages/extension/src/service-worker/index.ts) logs it as UNKNOWN, an anomaly rather than
+// a normal outcome. Component A itself has no "unknown" bucket — only real, actionable classes.
+function throwClassifiedAuthorizerRejection(
+  err: unknown,
+  attempt: 'silent' | 'interactive',
+  resource: string,
+  correlationId: string,
+  logger: Logger,
+): never {
+  const message = err instanceof Error ? err.message : String(err);
+
+  if (/did not approve access/i.test(message)) {
+    logger.info('classify', 'FORBIDDEN: user declined authorization', {
+      resource,
+      correlationId,
+      attempt,
+    });
+    throw new IapError('FORBIDDEN', `authorization declined by the user: ${message}`, {
+      cause: err,
+    });
+  }
+
+  if (/interaction required/i.test(message)) {
+    logger.info('classify', 'INTERACTION_REQUIRED: no usable session for a silent attempt', {
+      resource,
+      correlationId,
+      attempt,
+    });
+    throw new IapError(
+      'INTERACTION_REQUIRED',
+      `interactive authorization is required: ${message}`,
+      {
+        cause: err,
+      },
+    );
+  }
+
+  logger.warn('classify', 'unrecognized authorizer rejection; propagating unclassified', {
+    resource,
+    correlationId,
+    attempt,
+    error: message,
+  });
+  throw err;
 }
 
 function retryAfterMs(err: unknown): number | undefined {
@@ -87,13 +144,23 @@ export async function runAuthorizationLadder(
         resource,
         correlationId,
       });
-      throw silentErr;
+      throwClassifiedAuthorizerRejection(silentErr, 'silent', resource, correlationId, logger);
     }
     logger.debug('pkce', 'silent authorization failed, escalating to interactive', {
       resource,
       correlationId,
     });
-    redirectUrl = await authorizer.authorize(authUrl.toString(), { interactive: true });
+    try {
+      redirectUrl = await authorizer.authorize(authUrl.toString(), { interactive: true });
+    } catch (interactiveErr) {
+      throwClassifiedAuthorizerRejection(
+        interactiveErr,
+        'interactive',
+        resource,
+        correlationId,
+        logger,
+      );
+    }
   }
 
   // Unclassified until now: an access_denied redirect (the IdP authenticated the user but
@@ -132,24 +199,23 @@ export async function runAuthorizationLadder(
     isTransport,
     retryAfterMs,
     async () => {
-      let response: Response;
-      try {
-        response = await oauth.authorizationCodeGrantRequest(
-          as,
-          client,
-          oauth.None(),
-          callbackParams,
-          redirectUri,
-          codeVerifier,
-          // RFC 8707: resending `resource` at the token request is what lets the AS bind the
-          // audience even when scope also includes `openid` — without it, oidc-provider (and
-          // likely others) may fall back to resolving no resource at all, minting a
-          // token whose audience doesn't match any resource server.
-          { signal: requestSignal(), additionalParameters: { resource } },
-        );
-      } catch (err) {
-        throw toIapError(err, 'authorization code exchange');
-      }
+      const response = await oauth.authorizationCodeGrantRequest(
+        as,
+        client,
+        oauth.None(),
+        callbackParams,
+        redirectUri,
+        codeVerifier,
+        // RFC 8707: resending `resource` at the token request is what lets the AS bind the
+        // audience even when scope also includes `openid` — without it, oidc-provider (and
+        // likely others) may fall back to resolving no resource at all, minting a
+        // token whose audience doesn't match any resource server.
+        {
+          signal: requestSignal(),
+          additionalParameters: { resource },
+          [oauth.customFetch]: transportCustomFetch('authorization code exchange'),
+        },
+      );
       try {
         return await oauth.processAuthorizationCodeResponse(as, client, response, {
           expectedNonce: oauth.expectNoNonce,
@@ -179,15 +245,17 @@ export async function refreshAccessToken(
     isTransport,
     retryAfterMs,
     async () => {
-      let response: Response;
-      try {
-        response = await oauth.refreshTokenGrantRequest(as, client, oauth.None(), refreshToken, {
+      const response = await oauth.refreshTokenGrantRequest(
+        as,
+        client,
+        oauth.None(),
+        refreshToken,
+        {
           signal: requestSignal(),
           additionalParameters: { resource },
-        });
-      } catch (err) {
-        throw toIapError(err, 'token refresh');
-      }
+          [oauth.customFetch]: transportCustomFetch('token refresh'),
+        },
+      );
       try {
         return await oauth.processRefreshTokenResponse(as, client, response);
       } catch (err) {

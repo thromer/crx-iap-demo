@@ -5,12 +5,14 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@iap-demo/iap-auth": "workspace:*"
   },
   "devDependencies": {
-    "vite": "npm:rolldown-vite@^7.3.1"
+    "vite": "npm:rolldown-vite@^7.3.1",
+    "vitest": "^4.1.10"
   }
 }

@@ -15,7 +15,10 @@ export type UnreachableEndpoint =
   | 'asMetadata'
   | 'registration'
   | 'authorization'
-  | 'token';
+  | 'token'
+  // Missing from the original registry — needed for the checkpoint-3 review's Task 4
+  // (logout must report a failed revocation attempt to the caller, not just clear state).
+  | 'revocation';
 
 export interface ScenarioState {
   shortLivedTokensSeconds: number | undefined;

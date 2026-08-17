@@ -82,10 +82,11 @@ export function createTokenValidator(provider: Provider): TokenValidator {
 
 function unreachableTargetForPath(
   pathname: string,
-): 'asMetadata' | 'registration' | 'authorization' | undefined {
+): 'asMetadata' | 'registration' | 'authorization' | 'revocation' | undefined {
   if (pathname === RFC8414_PATH) return 'asMetadata';
   if (pathname === ROUTES.registration) return 'registration';
   if (pathname === ROUTES.authorization) return 'authorization';
+  if (pathname === ROUTES.revocation) return 'revocation';
   return undefined;
 }
 

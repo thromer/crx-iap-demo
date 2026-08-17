@@ -38,7 +38,14 @@ export interface Logger {
   error(subsystem: LogSubsystem, message: string, data?: Record<string, unknown>): void;
 }
 
-export type FailureClass = 'FORBIDDEN' | 'TRANSPORT' | 'MISCONFIGURED';
+// INTERACTION_REQUIRED (checkpoint-3 review, Task 3): a silent authorization attempt found no
+// usable session, and the caller explicitly passed `interactive: false` — forbidding the
+// module's own silent-to-interactive escalation. This is neither FORBIDDEN (nothing was
+// denied — there is simply no session to reuse silently, and interactive authorization would
+// likely succeed) nor MISCONFIGURED (nothing is broken). Response policy: surface to the
+// caller, do not retry, do not auto-escalate — the caller asked not to, and may deliberately
+// call again with `interactive: true` if it wants to prompt the user itself.
+export type FailureClass = 'FORBIDDEN' | 'TRANSPORT' | 'MISCONFIGURED' | 'INTERACTION_REQUIRED';
 
 export class IapError extends Error {
   readonly class: FailureClass;
@@ -76,7 +83,16 @@ export interface IapClient {
   fetch(input: string | URL, init?: RequestInit): Promise<Response>;
   probe(resource: string): Promise<ProbeResult>;
   login(resource: string, opts?: { interactive?: boolean }): Promise<void>;
-  logout(resource: string): Promise<void>;
+
+  /**
+   * Clears local state unconditionally and never throws — this holds whether there is no
+   * revocation_endpoint to call, or one exists but the revocation attempt itself fails (e.g.
+   * a transport failure). `revoked` distinguishes the two: true only when the AS confirmed
+   * the revocation; false covers both "nothing to revoke" and "revocation was attempted and
+   * failed" (checkpoint-3 review, Task 4 — a failed revocation must be visible to the caller,
+   * not indistinguishable from success).
+   */
+  logout(resource: string): Promise<{ revoked: boolean }>;
 
   /**
    * Returns a currently-valid token, refreshing or authorizing if needed. Subject to the

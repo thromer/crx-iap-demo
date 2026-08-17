@@ -134,6 +134,7 @@ const scenarioHandlers: Record<string, (args: ScenarioArgs) => void> = {
       'registration',
       'authorization',
       'token',
+      'revocation',
     ];
     if (!valid.includes(which)) throw new Error(`unknown endpointUnreachable target "${which}"`);
     state.scenarios.unreachable.add(which);

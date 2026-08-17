@@ -27,6 +27,7 @@ test('51: logout revokes at the AS and clears local state; the next request re-a
   const before = await requestLog(testServer);
   const outcome = await driver.send<ActionOutcome>({ type: 'logout', resource: origin });
   expect(outcome.ok).toBe(true);
+  if (outcome.ok) expect(outcome.revoked).toBe(true);
 
   const since = (await requestLog(testServer)).slice(before.length);
   expect(since.some((e) => e.server === 'as' && e.path === '/token/revocation')).toBe(true);
@@ -59,6 +60,7 @@ test('52: logout against an AS with no revocation_endpoint resolves cleanly and 
   const before = await requestLog(testServer);
   const outcome = await driver.send<ActionOutcome>({ type: 'logout', resource: origin });
   expect(outcome.ok).toBe(true);
+  if (outcome.ok) expect(outcome.revoked).toBe(false);
 
   const since = (await requestLog(testServer)).slice(before.length);
   expect(since.some((e) => e.path === '/token/revocation')).toBe(false);
@@ -68,4 +70,23 @@ test('52: logout against an AS with no revocation_endpoint resolves cleanly and 
     resource: origin,
   });
   expect(tokenId.tokenId).toBeNull();
+});
+
+// Task 4 (checkpoint-3 review): a revocation that was attempted and failed must still resolve
+// (state cleared regardless) but must be distinguishable from a real success — previously
+// logout() swallowed this into an identical-looking clean success.
+test('52b: a failed revocation attempt still clears local state but reports revoked: false', async ({
+  testServer,
+  driver,
+}) => {
+  const origin = testServer.origins.rsA;
+  await establishToken(driver, origin);
+  expect(await currentTokenId(driver, origin)).not.toBeNull();
+
+  await armScenario(testServer, 'endpointUnreachable', { which: 'revocation' });
+  const outcome = await driver.send<ActionOutcome>({ type: 'logout', resource: origin });
+
+  expect(outcome.ok).toBe(true);
+  if (outcome.ok) expect(outcome.revoked).toBe(false);
+  expect(await currentTokenId(driver, origin)).toBeNull();
 });

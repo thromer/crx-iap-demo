@@ -19,11 +19,19 @@ export type SwRequest =
   | { type: 'reportRejected'; resource: string; tokenId: string }
   | { type: 'currentTokenId'; resource: string };
 
-// IapClient's classify() only ever throws these three, but an Authorizer rejection (e.g. the
-// user closed the auth tab, or a silent attempt was refused with interactive:false) isn't a
-// classify() outcome at all — it's propagated unchanged. UNKNOWN covers that case for callers
-// of this message API, which don't get IapClient's typed errors directly.
-export type FailureClass = 'FORBIDDEN' | 'TRANSPORT' | 'MISCONFIGURED' | 'UNKNOWN';
+// The first four mirror @iap-demo/iap-auth's own FailureClass (including INTERACTION_REQUIRED,
+// added in the checkpoint-3 review's Task 3 — see packages/iap-auth/src/types.ts and
+// authorize.ts's throwClassifiedAuthorizerRejection() for what it means and how the two
+// authorizer-rejection cases Chrome actually produces are told apart). UNKNOWN is this
+// message layer's own addition: after Task 3, it is reachable only from a genuinely
+// unrecognized authorizer rejection — logged as an anomaly at the point classify() produces
+// it (packages/extension/src/service-worker/index.ts) — not a normal outcome.
+export type FailureClass =
+  | 'FORBIDDEN'
+  | 'TRANSPORT'
+  | 'MISCONFIGURED'
+  | 'INTERACTION_REQUIRED'
+  | 'UNKNOWN';
 
 export type FetchOutcome =
   | {
@@ -35,8 +43,11 @@ export type FetchOutcome =
     }
   | { ok: false; errorClass: FailureClass; message: string; promptOccurred: boolean };
 
+// `revoked` is set only on a 'logout' response (checkpoint-3 review, Task 4) — see
+// IapClient#logout's doc comment in packages/iap-auth/src/types.ts for what it distinguishes.
+// Absent on 'login'/'reportRejected' responses, which have nothing to report there.
 export type ActionOutcome =
-  | { ok: true; promptOccurred: boolean }
+  | { ok: true; promptOccurred: boolean; revoked?: boolean }
   | { ok: false; errorClass: FailureClass; message: string; promptOccurred: boolean };
 
 export type ProbeOutcome =
