@@ -66,3 +66,68 @@ authorization ladder as usual (GRANT_DEAD, then silent re-auth); once that compl
 broadcasts, every waiter — suppressed or not — sees the new tokenId and proceeds. Suppression
 only ever defers a caller's own report, never blocks it on nothing. See
 `packages/e2e/tests/dnr-attachment.spec.ts`'s test 57b for the permanent coverage.
+
+## The tokenId↔request correlation limitation (checkpoint-3 review, Task 16)
+
+**Mechanism.** Under DNR, the `Authorization` header is attached by the browser's network
+stack, below the JS layer entirely — `packages/extension/src/service-worker/dnr.ts`'s rule
+`set`s a header value on matching requests; nothing in this extension's JS ever sees what a
+specific outgoing request actually carried. So when the offscreen document observes a `401`
+from the stand-in Worker's request, it cannot know *which* token that particular request was
+rejected for — it can only report whatever tokenId it currently believes is valid (`tokenIdFor`,
+above). This is **structural, not an implementation weakness**: no code change on this side
+closes the gap, because the information genuinely never reaches JS. It will behave identically
+against real Cloudflare Access, or any other DNR-fronted resource.
+
+**Blast radius.** This is the root cause of the echo race documented above, not a separate
+issue — "the cached tokenId can go stale mid-flight" is what this structural gap actually looks
+like in practice. Concretely: a caller can name the *current* tokenId as rejected when its own
+request in fact carried a *stale* one (or vice versa), because there is no way to bind "this
+401" to "this specific token value" after the fact. The cost is an occasional redundant
+refresh, not a correctness failure — see the replay-detection finding below for how bounded
+that cost actually is.
+
+**Which assertions were bounded as a result, and what changed.** Before checkpoint-3 review
+Task 11, this gap forced tests 8 and 9's `via: 'worker'` variants into a loose bound
+(`toBeLessThanOrEqual(4)`) rather than an exact count, since real IPC scheduling determined how
+often the race actually fired. Task 11 didn't close the structural gap — it forced the race
+window shut for those two tests specifically, by arming `tokenEndpointHang` so no second
+tokenId can even exist yet by the time all ten reporters have read the cached value; that
+collapsed the *observable* result back to an exact count without touching the underlying
+mechanism. One assertion remains genuinely bounded because of a related-but-distinct gap (not
+this one): test 54 (`dnr-attachment.spec.ts`) asserts eventual success within `performFetch`'s
+retry cap, not first-attempt success, because of the `currentTokenId`/DNR *ordering* limitation
+Task 10 fixed for the deliberate-write case but that a native browser API's own timing can't be
+forced open for testing (see `docs/mutation-check.md`'s mutation 8 finding).
+
+**Mitigations considered and rejected.** Reading the request's own headers via
+`chrome.webRequest.onBeforeSendHeaders` (or similar) would let the offscreen document observe
+the *actual* header DNR attached, closing the correlation gap directly. Rejected: it would
+reopen exactly the choice PROMPT.md's checkpoint-2 decision already settled — "a narrower
+integration point than a network primitive" (this file's top section) — by adding a
+network-observation primitive back in, plus the extra permission surface and complexity that
+choice was made to avoid. Snapshotting the tokenId *before* issuing the request (rather than
+after detecting failure) doesn't help either: DNR evaluates and attaches the header
+asynchronously, invisible to JS, at send time — a rule can still change between snapshot and
+send regardless of when the snapshot is taken, so earlier snapshotting doesn't narrow the
+window, only moves it.
+
+**Determined empirically, not assumed: can a redundant refresh consume an already-rotated
+(dead) refresh token and trip replay detection?** This would be a materially worse cost than
+"one extra round trip" — `node-oidc-provider`'s rotation replay detection revokes the *entire
+grant* on a reused refresh token, forcing full re-authentication. Checked directly: armed
+`detectRefreshReplay` (which also enables `rotateRefreshTokens`), established a token, then
+issued five *sequential* `reportRejected` calls each naming whatever the *current* tokenId was
+at the time — simulating the echo race's worst case, where a stale report happens to land on
+the current value, repeatedly. All five succeeded, and a final fetch afterward still succeeded
+— the grant survived every round. This holds by construction, not luck: `acquireToken`'s read
+of the refresh token and its submission to the AS both happen strictly inside the single-flight
+lock's critical section for that resource (see `client.ts`), so no caller can ever read a
+refresh token that a *concurrent* caller is about to rotate out from under it — by the time any
+redundant refresh runs, it's reading whatever the lock's most recent holder just wrote. The
+echo race can still produce wasted round trips; it cannot produce a stale-token replay, because
+the lock's atomicity rules that out structurally, not incidentally. No manual-verification note
+was needed beyond what's already there, given this was proven rather than left as a risk to
+watch for — but worth re-confirming against real Cloudflare Access if the single-flight lock
+implementation ever changes shape, since the guarantee depends specifically on read-then-submit
+staying atomic within it.

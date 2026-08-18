@@ -88,3 +88,27 @@ once written) into a real, stable Google Chrome profile with Developer Mode enab
 flow described in items 1–2 of this file's eventual full list. This is deliberately the same
 loading mechanism a real end user would use, since that is exactly the case
 `--disable-extensions-except` cannot stand in for.
+
+---
+
+## 2. Watch for redundant refreshes against real Cloudflare Access, checkpoint-3 review Task 16
+
+**Status:** the specific worst-case risk (a redundant refresh consuming an already-rotated
+refresh token and tripping replay-detection grant revocation) was proven structurally
+unreachable, not just untested — see
+`packages/extension/docs/detecting-failure.md`'s "tokenId↔request correlation limitation"
+section for the full reasoning and the empirical check (five sequential echo-shaped
+`reportRejected` reports against `detectRefreshReplay`, grant survives every time). This entry
+exists because the underlying cause — DNR attaches the `Authorization` header below the JS
+layer, so this extension can never bind a specific `401` to the specific token value that
+request carried — is structural and will behave identically against real Cloudflare Access.
+
+**What to watch for by hand:** under concurrent library activity against a real Cloudflare
+Access-protected resource (multiple overlapping requests hitting a locally-expired-looking or
+recently-rotated token around the same time), confirm the *frequency* of redundant refreshes
+stays low in practice — this project's own test harness can force the race window open
+artificially (`tokenEndpointHang`) but cannot observe how often real-world IPC/network timing
+alone triggers it. A materially higher redundant-refresh rate than expected wouldn't be a
+correctness bug (the grant-survival guarantee above holds regardless of frequency), but it
+would mean unnecessary load against Cloudflare's token endpoint worth knowing about before
+relying on this pattern at any real scale.
