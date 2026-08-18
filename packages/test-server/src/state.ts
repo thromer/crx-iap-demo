@@ -6,6 +6,10 @@ export interface RequestLogEntry {
   origin: string;
   path: string;
   hadAuthorizationHeader: boolean;
+  // The Authorization header's bearer token, hashed the same way IapClient's own tokenId is
+  // (see hash.ts) — identity, never the raw value. undefined when hadAuthorizationHeader is
+  // false, or the header isn't a well-formed `Bearer <token>` (checkpoint-3 review, Task 13).
+  authorizationTokenId: string | undefined;
 }
 
 export type AppLevel401Kind = 'basic' | 'bare' | 'json';

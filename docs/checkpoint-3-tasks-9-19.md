@@ -264,6 +264,68 @@ the derived count will come down on its own rather than by adjustment.
 and confirm the new assertion fails. If it does not, the sequence assertion is not capturing
 what it claims.
 
+### Task 20 — Test 34 rejects for the wrong reason; split it and assert the cause
+
+You found that `injectForeignCode` presents a **different client_id**, so the AS rejects on
+client binding before PKCE verification is ever reached. The test named "an injected foreign
+authorization code is rejected" passes, but not for the reason its name claims — and the PKCE
+code-substitution defense it was believed to cover is currently untested.
+
+This also invalidates the justification recorded for test 30. The disclosure argued that 34
+"exercises exactly the same underlying defense (oauth4webapi's PKCE verification at the token
+endpoint)" and therefore stood in for 30. It does not. Update that entry once this task lands.
+
+#### 20.1 — Rename the existing test
+
+Rename `34: an injected foreign authorization code is rejected` to reflect what it actually
+verifies — a code issued to a different client is rejected — and update its comment. Client
+binding is a real property worth testing; it was only mislabelled. Keep the number.
+
+#### 20.2 — New scenario `substituteCodeChallenge`, new test 34a
+
+Construct a code that reaches the PKCE check and fails *there*. The code must be valid in every
+other respect so no earlier check short-circuits it:
+
+- **Same** `client_id` as the real client — otherwise you reproduce 34.
+- **Same** `redirect_uri`.
+- **State echoed back unchanged**, so the client's local state check passes and the exchange is
+  actually attempted.
+- Bound to a `code_challenge` of the AS's choosing rather than the one the client sent.
+
+The client then exchanges with its genuine `code_verifier`, which cannot match, and the AS
+rejects on PKCE. Assert: the exchange fails, the client surfaces a clean classified error, does
+not wedge, and a fresh login afterwards succeeds.
+
+#### 20.3 — Assert *which* defense fired, in both tests
+
+This is the part that generalizes. The original defect was that the test could not distinguish
+one rejection cause from another. Fix the observation surface, not just this test: record the
+AS's OAuth error code (`invalid_grant`, `invalid_client`, and so on) in the test server's
+request log alongside the existing fields.
+
+Then have test 34 assert the rejection carried the client-binding error, and 34a assert it
+carried the PKCE-related one. Without this, 34a is one AS-configuration change away from
+silently degenerating into 34 all over again.
+
+#### 20.4 — Sweep the other rejection tests
+
+Any test whose assertion is "rejected" without asserting *why* has the same latent defect.
+Check at least 23 (cross-origin resource metadata), 24 (issuer mismatch), 29 (tampered state),
+33 (error with no code), and 31 if it exists by then. For each: is there a plausible earlier
+check that could be doing the rejecting instead of the one the test names? Where the error code
+is now recorded, assert it. Where the rejection happens client-side and produces no server
+error, assert the classified error's identity rather than merely that something threw.
+
+Report the sweep's findings even where nothing is wrong — a short list confirming which tests
+were checked and found sound is worth having.
+
+#### 20.5 — Mutation-check rows
+
+- Disable the PKCE verification the client relies on at the token exchange → 34a must fail.
+- Point `substituteCodeChallenge` at a different `client_id` → 34a must fail on the *error code
+  assertion*, not pass by accidentally reproducing 34. This is the regression guard for the
+  exact bug being fixed here.
+  
 ---
 
 ## Accepted without change
@@ -279,7 +341,7 @@ and the `via: 'sw'` half of test 40.
 
 Tasks 9 and 10 first, separately — both change product behavior and
 may move other tests, i.e. stop for human review after each. Then
-11–15, stop for human review. Then 16–19, stop for human review.
+11–15, stop for human review. Then 16–19, stop for human review. Then 20.
 
 Every new scenario added to the test server gets a matching mutation-check row: break the thing
 it is meant to catch, confirm the test goes red. Append to `docs/mutation-check.md`. That

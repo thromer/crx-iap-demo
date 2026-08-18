@@ -1,6 +1,7 @@
 import https from 'node:https';
 import type { GeneratedCertificates } from './certs/generate.ts';
 import { ORIGINS } from './config.ts';
+import { bearerTokenId } from './hash.ts';
 import { sendJson, sendMalformed } from './http.ts';
 import { state } from './state.ts';
 
@@ -50,6 +51,7 @@ export function createResourceServer(
       origin,
       path: url.pathname,
       hadAuthorizationHeader: authHeader !== undefined,
+      authorizationTokenId: await bearerTokenId(authHeader),
     });
 
     if (

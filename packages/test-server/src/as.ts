@@ -3,6 +3,7 @@ import https from 'node:https';
 import Provider, { type Configuration, type InteractionDetails } from 'oidc-provider';
 import type { GeneratedCertificates } from './certs/generate.ts';
 import { ORIGINS } from './config.ts';
+import { bearerTokenId } from './hash.ts';
 import { delay, readRawBody, replayableRequest, sendJson, sendMalformed } from './http.ts';
 import type { TokenValidation, TokenValidator } from './rs.ts';
 import { state } from './state.ts';
@@ -432,6 +433,7 @@ export function createAuthorizationServer(cert: GeneratedCertificates): {
       origin: ORIGINS.as,
       path: url.pathname,
       hadAuthorizationHeader: authHeader !== undefined,
+      authorizationTokenId: await bearerTokenId(authHeader),
     });
 
     const unreachableTarget = unreachableTargetForPath(url.pathname);

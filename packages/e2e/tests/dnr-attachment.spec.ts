@@ -385,17 +385,19 @@ test('62: an application-level 403 through the Worker is not reported as a rejec
 });
 
 // Test 63: the module's own SW fetch() while a rule is active -> the request reaches the RS
-// with an Authorization header and succeeds, confirming the documented DNR-wins behavior
-// rather than a corrupted/conflicting header. The request log only records header *presence*,
-// not a raw header count, so a literal "exactly one, not duplicated" count isn't observable
-// from here — a 200 response is the strongest signal available: a malformed/duplicated
-// Authorization header would not validate cleanly against the resource server.
+// with exactly one Authorization header carrying the *current* token, confirming the
+// documented DNR-wins behavior rather than a corrupted/conflicting header. Checkpoint-3
+// review, Task 13: the request log now records the header's value (hashed the same way
+// IapClient's own tokenId is — see hash.ts), directly comparable to `currentTokenId`, so this
+// asserts identity, not just presence — a stale, duplicated, or foreign header now fails this
+// test even if the resource server happened to still accept it.
 test("63: the module's own fetch() succeeds normally while a DNR rule is active for the same origin", async ({
   testServer,
   driver,
 }) => {
   const origin = testServer.origins.rsA;
   await establishToken(driver, origin);
+  const tokenId = await currentTokenId(driver, origin);
 
   const before = await requestLog(testServer);
   const outcome = await driver.send<FetchOutcome>({
@@ -408,4 +410,5 @@ test("63: the module's own fetch() succeeds normally while a DNR rule is active 
   const since = (await requestLog(testServer)).slice(before.length);
   expect(since).toHaveLength(1);
   expect(since[0]?.hadAuthorizationHeader).toBe(true);
+  expect(since[0]?.authorizationTokenId).toBe(tokenId);
 });

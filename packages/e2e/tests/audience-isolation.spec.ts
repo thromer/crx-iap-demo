@@ -1,6 +1,7 @@
 import type { CurrentTokenIdOutcome, FetchOutcome } from '../../extension/src/shared/messages.ts';
 import {
   armScenario,
+  currentTokenId,
   establishToken,
   expect,
   performFetch,
@@ -9,7 +10,10 @@ import {
 } from '../src/fixtures.ts';
 
 // Test 35: a token minted for origin A must never be attached to a request against origin B —
-// and B gets its own fresh flow rather than reusing A's token.
+// and B gets its own fresh flow rather than reusing A's token. Checkpoint-3 review, Task 13:
+// once both resources have their own token, also confirm each one's *own* requests carry its
+// *own* token identity, not just "a" header — the request log's hashed authorizationTokenId
+// (hash.ts) is directly comparable to currentTokenId, so this asserts identity, not presence.
 test('35: a token for one resource is never attached to a different resource', async ({
   testServer,
   driver,
@@ -32,6 +36,25 @@ test('35: a token for one resource is never attached to a different resource', a
   expect(firstToB?.hadAuthorizationHeader).toBe(false);
   // A fresh flow ran for B: at least a token-endpoint request of its own.
   expect(since.some((e) => e.server === 'as' && e.path === '/token')).toBe(true);
+
+  // Now both resources have a token. A further request to each must carry *that resource's
+  // own* token identity — not the other's, and not stale.
+  const tokenIdA = await currentTokenId(driver, originA);
+  const tokenIdB = await currentTokenId(driver, originB);
+  expect(tokenIdA).not.toBeNull();
+  expect(tokenIdB).not.toBeNull();
+  expect(tokenIdA).not.toBe(tokenIdB);
+
+  const beforeCross = await requestLog(testServer);
+  const outcomeA = await driver.send<FetchOutcome>({
+    type: 'fetch',
+    resource: `${originA}/api/resource`,
+  });
+  expect(outcomeA.ok).toBe(true);
+  const sinceCross = (await requestLog(testServer)).slice(beforeCross.length);
+  const hitA = sinceCross.find((e) => e.origin === originA);
+  expect(hitA?.authorizationTokenId).toBe(tokenIdA);
+  expect(hitA?.authorizationTokenId).not.toBe(tokenIdB);
 });
 
 // Test 36: two resources behind one AS get two independent token entries, no crosstalk, and

@@ -1,7 +1,7 @@
 # Mutation check
 
 Checkpoint-3 review, Task 8 (mutations 1–7); Task 10 adds mutation 8; Task 12 adds mutations
-10–13. For each mutation below: the change was applied to the real source (test-server
+10–13; Task 13 adds mutation 14. For each mutation below: the change was applied to the real source (test-server
 mutations don't need an extension rebuild; extension/iap-auth mutations do), the named test(s)
 were run against the mutated build, the result was recorded, and the mutation was reverted
 (`git checkout --` or a manual revert, confirmed clean via `git status`/`grep MUTATION` before
@@ -32,8 +32,9 @@ including when a mutation doesn't fail as predicted.
 | 11 | `rejectCodeExchange`'s branch never fires (`as.ts`'s token endpoint handler) | 30 | ✅ Failed as expected — `outcome.ok` was `true` on the first exchange |
 | 12 | `reissuePreviousCode` always mints fresh instead of reusing the captured code (`as.ts`) | 31 | ✅ Failed as expected — the second login's replayed-code attempt succeeded instead of failing |
 | 13 | `injectForeignCode`'s branch never fires (`as.ts`) | 34 | ✅ Failed as expected — `outcome.ok` was `true` (the real client's own normal login succeeds when nothing is injected) |
+| 14 | `bearerTokenId` (`test-server/src/hash.ts`) always returns a fixed, wrong value when a header is present | 63, 35 | ✅ Both failed as expected — `authorizationTokenId` was `"deadbeef"` instead of the real tokenId, at the new identity assertion specifically (presence assertions above it still passed) |
 
-**12 of 14 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
+**13 of 15 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
 
 ## The one that didn't: mutation 3, test 57
 
@@ -253,6 +254,30 @@ letting the corrected label quietly imply nothing changed. Mutation-proven (row 
 the client-identity-binding property it actually tests. No coverage was lost; it was
 mislabeled, and the mislabeling had gone unnoticed specifically because the test had never been
 mutation-checked before.
+
+## Task 13: a real observation surface for the request log
+
+The request log recorded header *presence* only, so "exactly one Authorization header carrying
+the current token" (test 63) and audience isolation (test 35, tests 17/9's audience-adjacent
+assertions) were inferred from the request succeeding rather than observed directly — a
+malformed, duplicated, or foreign-but-still-accepted header would have passed unnoticed.
+
+Extended `RequestLogEntry` with `authorizationTokenId`: the bearer token's identity, hashed the
+same way (`shortHash`, duplicated in `packages/test-server/src/hash.ts` — this package has no
+dependency on `iap-auth` to import it from) IapClient's own `tokenId` is, so it's directly
+comparable to `currentTokenId(driver, origin)` in tests without ever logging the raw token
+value. Test 63 and test 35 rewritten to assert identity (`authorizationTokenId === tokenId`),
+not just presence. Test 17 was checked but not changed: after Task 9's reverted attempt, its
+current scope has no cached token at all (the only unambiguous case for detecting
+"unprotected"), so there's no positive identity to assert — only absence, which it already
+covers correctly.
+
+Mutation-proven (row 14): this is new *test infrastructure* (the request-log field itself), not
+product code, so the mutation matches the precedent set by mutation 7 (`fixtures.ts`'s
+`stopServiceWorker`) — break the instrumentation, confirm the tests built on top of it actually
+depend on it. Forcing `bearerTokenId` to always return a fixed wrong value left presence
+assertions passing and failed both tests exactly at the new identity assertion, confirming
+they're genuinely exercising the new field rather than passing vacuously.
 
 ## Notes on process
 
