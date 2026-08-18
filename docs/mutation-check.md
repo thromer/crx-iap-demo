@@ -1,17 +1,16 @@
 # Mutation check
 
 Checkpoint-3 review, Task 8 (mutations 1–7); Task 10 adds mutation 8; Task 12 adds mutations
-10–13; Task 13 adds mutation 14; Task 14 adds mutation 15; Task 15 adds mutation 16. For each
-mutation below: the change
-was applied to the real source (test-server mutations don't need an extension rebuild;
-extension/iap-auth mutations do), the named test(s) were run against the mutated build, the
-result was recorded, and the mutation was reverted (`git checkout --` or a manual revert,
-confirmed clean via `git status`/`grep MUTATION` before moving to the next row — none
-compounded). Every mutation was exercised individually, never combined. This document is kept
-current across review rounds, not treated as a one-off — a standing project working agreement
-(`project_mutation_check_requirement` memory): every new or materially modified test gets a
-mutation proving it non-vacuous, logged here honestly, including when a mutation doesn't fail
-as predicted.
+10–13; Task 13 adds mutation 14; Task 14 adds mutation 15; Task 15 adds mutation 16; Task 18
+adds mutation 17. For each mutation below: the change was applied to the real source
+(test-server mutations don't need an extension rebuild; extension/iap-auth mutations do), the
+named test(s) were run against the mutated build, the result was recorded, and the mutation was
+reverted (`git checkout --` or a manual revert, confirmed clean via `git status`/`grep
+MUTATION` before moving to the next row — none compounded). Every mutation was exercised
+individually, never combined. This document is kept current across review rounds, not treated
+as a one-off — a standing project working agreement (`project_mutation_check_requirement`
+memory): every new or materially modified test gets a mutation proving it non-vacuous, logged
+here honestly, including when a mutation doesn't fail as predicted.
 
 ## Results
 
@@ -37,8 +36,9 @@ as predicted.
 | 14 | `bearerTokenId` (`test-server/src/hash.ts`) always returns a fixed, wrong value when a header is present | 63, 35 | ✅ Both failed as expected — `authorizationTokenId` was `"deadbeef"` instead of the real tokenId, at the new identity assertion specifically (presence assertions above it still passed) |
 | 15 | Offscreen document misreads a transport failure (Worker `fetch()` throws) as a token rejection, firing `reportRejected` (`offscreen.ts`'s `handleStandInFetch`) | 40 (`via: 'worker'`) | ✅ Failed as expected — a spurious `/token` request appeared where the test asserts none |
 | 16 | `fallbackClientId` branch never used, even when configured (`discovery.ts`'s `registerOrGetClient`) | `client.test.ts`'s "fallbackClientId > succeeds using the configured fallback client id..." | ✅ Failed as expected — same `MISCONFIGURED` error the "without a fallbackClientId" half already covers |
+| 17 | A real type error introduced in `dispatch.ts` (an extra parameter of a nonexistent type) | `yarn workspace @iap-demo/extension build` itself | ✅ Failed as expected — build exits 1, no `dist/` artifact produced, instead of silently building on the untyped-JS output the way Vite alone does |
 
-**15 of 17 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14, 15, 16 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
+**16 of 18 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14, 15, 16, 17 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
 
 ## The one that didn't: mutation 3, test 57
 
@@ -340,6 +340,13 @@ half already asserts, confirming the new test genuinely depends on that branch b
   before this document was written; neither left a lasting change.
 - Mutation 3's TypeScript build reported two `noUnusedLocals`/`noUnusedParameters`-adjacent
   errors during the temporary lock-removal (the unused `inFlight` map and `logger` field) —
-  expected and harmless for a throwaway mutation; Vite's build (which the e2e suite actually
-  runs against) does not block on `tsc` errors, so the mutated extension still built and ran
-  correctly for the test.
+  expected and harmless for a throwaway mutation. At the time, Vite's build (which the e2e
+  suite actually runs against) did not block on `tsc` errors, so the mutated extension still
+  built and ran correctly for the test. **Checkpoint-3 review, Task 18 changed this
+  property going forward:** `packages/extension`'s `build` script now runs `tsc --noEmit`
+  before `vite build`, so a type error blocks the build outright rather than silently reaching
+  the tested artifact. Mutation-proven (row 17): a real type error introduced in `dispatch.ts`
+  makes `yarn workspace @iap-demo/extension build` itself fail (exit 1, no `dist/` produced).
+  Any *future* mutation-check row that leaves a type error in place (as mutation 3 did, and as
+  any throwaway mutation reasonably might) will need `git checkout --`'s revert step to happen
+  before attempting a build, not after — the build itself no longer tolerates it.
