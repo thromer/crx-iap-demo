@@ -16,6 +16,12 @@ import { ensureOffscreenDocument } from './offscreen-manager.ts';
 import { createDurableStore, createSessionStore } from './storage.ts';
 import { syncToken } from './token-sync.ts';
 
+// No fallbackClientId (checkpoint-3 review, Task 15 — decided and documented, not an
+// oversight): it exists for an AS that doesn't support Dynamic Client Registration at all,
+// requiring an operator to pre-register a client_id with that specific AS out of band. Setting
+// one here would only work against that one pre-known AS, contradicting this extension's whole
+// point — RFC 7591 DCR against any RFC 9728-compliant resource, with no admin step. See test
+// 27's comment in packages/e2e/tests/discovery.spec.ts for the full reasoning.
 const client = createIapClient({
   session: createSessionStore(),
   durable: createDurableStore(),

@@ -1,7 +1,8 @@
 # Mutation check
 
 Checkpoint-3 review, Task 8 (mutations 1–7); Task 10 adds mutation 8; Task 12 adds mutations
-10–13; Task 13 adds mutation 14; Task 14 adds mutation 15. For each mutation below: the change
+10–13; Task 13 adds mutation 14; Task 14 adds mutation 15; Task 15 adds mutation 16. For each
+mutation below: the change
 was applied to the real source (test-server mutations don't need an extension rebuild;
 extension/iap-auth mutations do), the named test(s) were run against the mutated build, the
 result was recorded, and the mutation was reverted (`git checkout --` or a manual revert,
@@ -35,8 +36,9 @@ as predicted.
 | 13 | `injectForeignCode`'s branch never fires (`as.ts`) | 34 | ✅ Failed as expected — `outcome.ok` was `true` (the real client's own normal login succeeds when nothing is injected) |
 | 14 | `bearerTokenId` (`test-server/src/hash.ts`) always returns a fixed, wrong value when a header is present | 63, 35 | ✅ Both failed as expected — `authorizationTokenId` was `"deadbeef"` instead of the real tokenId, at the new identity assertion specifically (presence assertions above it still passed) |
 | 15 | Offscreen document misreads a transport failure (Worker `fetch()` throws) as a token rejection, firing `reportRejected` (`offscreen.ts`'s `handleStandInFetch`) | 40 (`via: 'worker'`) | ✅ Failed as expected — a spurious `/token` request appeared where the test asserts none |
+| 16 | `fallbackClientId` branch never used, even when configured (`discovery.ts`'s `registerOrGetClient`) | `client.test.ts`'s "fallbackClientId > succeeds using the configured fallback client id..." | ✅ Failed as expected — same `MISCONFIGURED` error the "without a fallbackClientId" half already covers |
 
-**14 of 16 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14, 15 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
+**15 of 17 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14, 15, 16 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
 
 ## The one that didn't: mutation 3, test 57
 
@@ -302,6 +304,32 @@ as a rejection worth reporting. It fails test 40 (`via: 'worker'`) as expected �
 `/token` request appears where the test asserts there must be none — confirming the test
 actually depends on that distinction being made correctly, not just on the offline case
 happening to produce a `TRANSPORT`-shaped outcome.
+
+## Task 15: closing the test 27 gap
+
+`discovery.spec.ts`'s test 27 comment claimed `fallbackClientId`'s success path was "covered by
+packages/iap-auth's own unit tests" — that test did not exist (the finding that motivated
+`[[feedback_verify_coverage_claims]]`). Written now: `client.test.ts`'s "fallbackClientId >
+succeeds using the configured fallback client id when the AS has no registration_endpoint".
+Reaching it required a real, statically-registered client on the test AS
+(`FALLBACK_CLIENT_ID` in `as.ts`) — with no `registration_endpoint`, the client never tells the
+AS its `redirect_uri` via DCR, so the AS has to already know a client by that exact id and
+`redirect_uri` ahead of time, the same "the test server is ours" pattern Task 12 used.
+
+Also answered the question the gap exposed: the shipped extension deliberately does not
+configure a `fallbackClientId`, and that's correct, not an oversight. PROMPT.md frames DCR (RFC
+7591) as letting the client "self-register with no admin step" — `fallbackClientId` exists for
+the opposite case, an AS that doesn't support DCR at all, requiring an operator to have
+pre-registered a client_id with that specific AS out of band. Configuring one at build time
+would only work against that one pre-known AS, contradicting the extension's own "any RFC
+9728-compliant resource, zero admin step" design. It's library-only API for a consumer of
+`@iap-demo/iap-auth` targeting a specific, known, DCR-less AS. Documented at both ends: test
+27's comment in `discovery.spec.ts`, and the `createIapClient` call site in
+`packages/extension/src/service-worker/index.ts`.
+
+Mutation-proven (row 16): disabled the `fallbackClientId` branch in `discovery.ts` entirely —
+the new unit test fails with the same `MISCONFIGURED` error the "without a fallbackClientId"
+half already asserts, confirming the new test genuinely depends on that branch being taken.
 
 ## Notes on process
 

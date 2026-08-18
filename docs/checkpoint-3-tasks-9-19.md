@@ -341,7 +341,7 @@ and the `via: 'sw'` half of test 40.
 
 Tasks 9 and 10 first, separately — both change product behavior and
 may move other tests, i.e. stop for human review after each. Then
-11–15, stop for human review. Then 16–19, stop for human review. Then 20.
+11–20. Pause if you encounter surprises or get stuck.
 
 Every new scenario added to the test server gets a matching mutation-check row: break the thing
 it is meant to catch, confirm the test goes red. Append to `docs/mutation-check.md`. That

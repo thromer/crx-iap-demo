@@ -222,12 +222,24 @@ test('26: multiple authorization_servers deterministically selects the first-lis
   expect(log.some((e) => e.origin.includes('127.0.0.1'))).toBe(false);
 });
 
-// Test 27: noRegistrationEndpoint without a fallbackClientId -> clear MISCONFIGURED. The
-// shipped extension does not configure a fallbackClientId (see
-// packages/extension/src/service-worker/index.ts), so the "succeeds using it" half of this
-// test is a Component-A-level concern covered by packages/iap-auth's own unit tests rather
-// than reachable through the real extension here — there's nothing this harness could drive
-// to reach that branch without adding a hook PROMPT.md forbids.
+// Test 27: noRegistrationEndpoint without a fallbackClientId -> clear MISCONFIGURED.
+//
+// The "succeeds using it" half is covered instead by packages/iap-auth/test/client.test.ts's
+// "fallbackClientId > succeeds using the configured fallback client id when the AS has no
+// registration_endpoint" (checkpoint-3 review, Task 15 — that unit test did not exist when
+// this comment previously claimed it did; verified, not assumed, before writing this one).
+//
+// Deliberate, not a gap: the shipped extension does not configure a fallbackClientId (see
+// packages/extension/src/service-worker/index.ts's createIapClient call) and this e2e suite
+// has nothing to drive that would reach it without adding a hook PROMPT.md forbids. That's the
+// correct end state, not a missing wire-up — PROMPT.md's Component A explicitly frames DCR
+// (RFC 7591) as "the client self-registers with no admin step," and fallbackClientId exists
+// specifically for the opposite case: an AS that doesn't support DCR at all, requiring an
+// operator to have pre-registered a client_id with it out of band. Configuring one at build
+// time would only work against that one pre-known AS, defeating the "any RFC 9728-compliant
+// resource, zero admin step" generality the extension is built around. It's library-only API
+// for a consumer of @iap-demo/iap-auth targeting a specific, known, DCR-less AS — not something
+// this demo extension itself should ever set.
 test('27: no registration_endpoint and no fallbackClientId classifies as MISCONFIGURED', async ({
   testServer,
   driver,

@@ -11,6 +11,14 @@ import { state } from './state.ts';
 const TEST_ACCOUNT_ID = 'test-user';
 // Registered statically so injectForeignCode has a real, distinct client to mint a code for.
 const DECOY_CLIENT_ID = 'decoy-client';
+// Registered statically for the checkpoint-3 review's Task 15 (fallbackClientId's success
+// path): with no registration_endpoint, the client never tells the AS its redirect_uri via
+// DCR, so the AS has to already know a client by this exact id. Exported so unit tests can
+// import it rather than hardcoding a string that would silently drift from this file. The
+// redirect_uri matches this project's existing unit-test convention (client.test.ts's own
+// REDIRECT_URI), not an arbitrary new one.
+export const FALLBACK_CLIENT_ID = 'fallback-client';
+const FALLBACK_CLIENT_REDIRECT_URI = 'https://client.invalid/cb';
 
 const ROUTES = {
   authorization: '/auth',
@@ -31,6 +39,13 @@ function buildConfiguration(): Configuration {
         token_endpoint_auth_method: 'none',
         redirect_uris: ['https://decoy.invalid/cb'],
         grant_types: ['authorization_code'],
+        response_types: ['code'],
+      },
+      {
+        client_id: FALLBACK_CLIENT_ID,
+        token_endpoint_auth_method: 'none',
+        redirect_uris: [FALLBACK_CLIENT_REDIRECT_URI],
+        grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
       },
     ],

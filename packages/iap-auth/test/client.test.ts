@@ -1,5 +1,6 @@
 import { Agent, setGlobalDispatcher } from 'undici';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { FALLBACK_CLIENT_ID } from '../../test-server/src/as.ts';
 import { startTestServer, type TestServerHandle } from '../../test-server/src/index.ts';
 import { createIapClient } from '../src/index.ts';
 import { accessKey, refreshKey } from '../src/keys.ts';
@@ -370,5 +371,43 @@ describe('logout()', () => {
 
     const result = await client.logout(server.origins.rsA);
     expect(result).toEqual({ revoked: false });
+  });
+});
+
+// Checkpoint-3 review, Task 15: closes the test 27 gap — discovery.spec.ts's e2e test 27
+// claimed this success path was "covered by packages/iap-auth's own unit tests", which did not
+// exist until this test. FALLBACK_CLIENT_ID is registered statically on the test AS (see
+// packages/test-server/src/as.ts) specifically so this path is reachable without DCR: with no
+// registration_endpoint, the client never tells the AS its redirect_uri, so the AS has to
+// already know a client by this exact id and redirect_uri.
+describe('fallbackClientId', () => {
+  it('succeeds using the configured fallback client id when the AS has no registration_endpoint', async () => {
+    const clock = new FakeClock();
+    const durable = inMemoryStore();
+    const session = inMemoryStore();
+    const client = createIapClient({
+      session,
+      durable,
+      authorizer: createHttpAuthorizer(REDIRECT_URI),
+      clock,
+      fallbackClientId: FALLBACK_CLIENT_ID,
+    });
+
+    await armScenario(server.origins.control, 'noRegistrationEndpoint');
+
+    const registrationsBefore = await countRequests(
+      server.origins.control,
+      (e) => e.server === 'as' && e.path === '/reg',
+    );
+    const { token, tokenId } = await client.getToken(server.origins.rsA);
+    expect(token).toBeTruthy();
+    expect(tokenId).toBeTruthy();
+
+    // No DCR request — the fallback id was used directly, never registered dynamically.
+    const registrationsAfter = await countRequests(
+      server.origins.control,
+      (e) => e.server === 'as' && e.path === '/reg',
+    );
+    expect(registrationsAfter - registrationsBefore).toBe(0);
   });
 });
