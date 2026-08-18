@@ -144,9 +144,14 @@ const scenarioHandlers: Record<string, (args: ScenarioArgs) => void> = {
       'authorization',
       'token',
       'revocation',
+      'resource',
     ];
     if (!valid.includes(which)) throw new Error(`unknown endpointUnreachable target "${which}"`);
-    state.scenarios.unreachable.add(which);
+    if (bool(args, 'on', true)) {
+      state.scenarios.unreachable.add(which);
+    } else {
+      state.scenarios.unreachable.delete(which);
+    }
   },
   redirectToForeignOrigin: () => {
     state.scenarios.redirectToForeignOrigin = true;

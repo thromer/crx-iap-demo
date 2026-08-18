@@ -10,11 +10,25 @@ import {
   watchForPage,
 } from '../src/fixtures.ts';
 
-// Test 40 (transport vs. auth): context.setOffline(true) -> no prompt, no auth state
-// mutation, TRANSPORT error. Restore connectivity -> next request succeeds with the original
-// token. Parameterized per PROMPT.md, since offline should block the stand-in Worker's own
-// request directly (unlike 41-43 below, which are entirely AS/token-endpoint concerns the
-// stand-in never talks to) — but see the 'worker' skip below.
+// Test 40 (transport vs. auth): going offline -> no prompt, no auth state mutation, TRANSPORT
+// error. Restore connectivity -> next request succeeds with the original token. Parameterized
+// per PROMPT.md, since offline should block the stand-in Worker's own request directly (unlike
+// 41-43 below, which are entirely AS/token-endpoint concerns the stand-in never talks to).
+//
+// 'sw' uses context.setOffline(true) directly. 'worker' cannot: confirmed directly
+// (message-level, bypassing this test's own assertions) that Playwright's offline network
+// emulation blocks a page-level fetch() in this environment but does not reach the stand-in's
+// dedicated Worker fetch, spawned from the extension's offscreen document — not a bug in the
+// extension, and not fixable without the kind of test-only hook PROMPT.md forbids (see
+// fixtures.ts's module header, finding 6). Recovered instead (checkpoint-3 review, Task 14) via
+// a lever this project already controls: `endpointUnreachable` on the resource server itself
+// (a new 'resource' target, distinct from the existing 'resourceMetadata' one), which destroys
+// the socket for a real network-level failure the stand-in's real fetch() genuinely hits.
+//
+// Worth recovering specifically because the worker path has a failure mode the sw path
+// doesn't: the offscreen document could, in principle, misread a transport failure as a
+// rejection and fire a spurious reportRejected, producing a refresh in response to what's
+// really just a network blip. Asserted directly from the request log below, not assumed.
 for (const via of ['sw', 'worker'] as const) {
   test.describe(`via: ${via}`, () => {
     test.use({ via });
@@ -24,25 +38,18 @@ for (const via of ['sw', 'worker'] as const) {
       extensionContext,
       driver,
     }) => {
-      // Confirmed directly (message-level, bypassing this test's own assertions):
-      // context.setOffline(true) blocks a page-level fetch() in this environment but does NOT
-      // block the stand-in's dedicated Worker fetch, spawned from the extension's offscreen
-      // document — Playwright's offline network emulation does not reach that target here.
-      // Not a bug in the extension; nothing to work around inside packages/extension without
-      // adding the kind of test-only hook PROMPT.md forbids. See fixtures.ts's module header
-      // (finding 6) and the memory note this was folded into.
-      test.skip(
-        via === 'worker',
-        "context.setOffline() does not reach the stand-in's dedicated Worker in this environment — see fixtures.ts finding 6",
-      );
-
       const origin = testServer.origins.rsA;
       await establishToken(driver, origin);
 
       const before = await currentTokenId(driver, origin);
       expect(before).not.toBeNull();
 
-      await extensionContext.setOffline(true);
+      const beforeLog = await requestLog(testServer);
+      if (via === 'sw') {
+        await extensionContext.setOffline(true);
+      } else {
+        await armScenario(testServer, 'endpointUnreachable', { which: 'resource' });
+      }
       try {
         const pagePromise = watchForPage(extensionContext);
         const offlineOutcome = await performFetch(driver, via, origin, '/api/resource');
@@ -52,8 +59,17 @@ for (const via of ['sw', 'worker'] as const) {
         expect(offlineOutcome.ok).toBe(false);
         if (via === 'sw') expect(offlineOutcome.errorClass).toBe('TRANSPORT');
       } finally {
-        await extensionContext.setOffline(false);
+        if (via === 'sw') {
+          await extensionContext.setOffline(false);
+        } else {
+          await armScenario(testServer, 'endpointUnreachable', { which: 'resource', on: false });
+        }
       }
+
+      // No spurious refresh in response to the transport failure — the offscreen document must
+      // not have misread it as a token rejection.
+      const since = (await requestLog(testServer)).slice(beforeLog.length);
+      expect(since.filter((e) => e.server === 'as' && e.path === '/token')).toHaveLength(0);
 
       expect(await currentTokenId(driver, origin)).toBe(before);
 

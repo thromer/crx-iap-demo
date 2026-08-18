@@ -1,15 +1,16 @@
 # Mutation check
 
 Checkpoint-3 review, Task 8 (mutations 1–7); Task 10 adds mutation 8; Task 12 adds mutations
-10–13; Task 13 adds mutation 14. For each mutation below: the change was applied to the real source (test-server
-mutations don't need an extension rebuild; extension/iap-auth mutations do), the named test(s)
-were run against the mutated build, the result was recorded, and the mutation was reverted
-(`git checkout --` or a manual revert, confirmed clean via `git status`/`grep MUTATION` before
-moving to the next row — none compounded). Every mutation was exercised individually, never
-combined. This document is kept current across review rounds, not treated as a one-off — a
-standing project working agreement (`project_mutation_check_requirement` memory): every new or
-materially modified test gets a mutation proving it non-vacuous, logged here honestly,
-including when a mutation doesn't fail as predicted.
+10–13; Task 13 adds mutation 14; Task 14 adds mutation 15. For each mutation below: the change
+was applied to the real source (test-server mutations don't need an extension rebuild;
+extension/iap-auth mutations do), the named test(s) were run against the mutated build, the
+result was recorded, and the mutation was reverted (`git checkout --` or a manual revert,
+confirmed clean via `git status`/`grep MUTATION` before moving to the next row — none
+compounded). Every mutation was exercised individually, never combined. This document is kept
+current across review rounds, not treated as a one-off — a standing project working agreement
+(`project_mutation_check_requirement` memory): every new or materially modified test gets a
+mutation proving it non-vacuous, logged here honestly, including when a mutation doesn't fail
+as predicted.
 
 ## Results
 
@@ -33,8 +34,9 @@ including when a mutation doesn't fail as predicted.
 | 12 | `reissuePreviousCode` always mints fresh instead of reusing the captured code (`as.ts`) | 31 | ✅ Failed as expected — the second login's replayed-code attempt succeeded instead of failing |
 | 13 | `injectForeignCode`'s branch never fires (`as.ts`) | 34 | ✅ Failed as expected — `outcome.ok` was `true` (the real client's own normal login succeeds when nothing is injected) |
 | 14 | `bearerTokenId` (`test-server/src/hash.ts`) always returns a fixed, wrong value when a header is present | 63, 35 | ✅ Both failed as expected — `authorizationTokenId` was `"deadbeef"` instead of the real tokenId, at the new identity assertion specifically (presence assertions above it still passed) |
+| 15 | Offscreen document misreads a transport failure (Worker `fetch()` throws) as a token rejection, firing `reportRejected` (`offscreen.ts`'s `handleStandInFetch`) | 40 (`via: 'worker'`) | ✅ Failed as expected — a spurious `/token` request appeared where the test asserts none |
 
-**13 of 15 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
+**14 of 16 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14, 15 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
 
 ## The one that didn't: mutation 3, test 57
 
@@ -278,6 +280,28 @@ product code, so the mutation matches the precedent set by mutation 7 (`fixtures
 depend on it. Forcing `bearerTokenId` to always return a fixed wrong value left presence
 assertions passing and failed both tests exactly at the new identity assertion, confirming
 they're genuinely exercising the new field rather than passing vacuously.
+
+## Task 14: recovering test 40's `via: 'worker'` variant
+
+`context.setOffline(true)` doesn't reach the stand-in Worker's own `fetch()` in this
+environment (confirmed directly, not assumed — see the test's own comment), so the `worker`
+variant was skipped. The property is reachable server-side instead: added a new
+`endpointUnreachable` target, `'resource'` (distinct from the existing `'resourceMetadata'`),
+which destroys the socket for the protected resource itself — a real network-level failure the
+stand-in's real `fetch()` genuinely hits, the same way Task 12's control-plane scenarios
+constructed attacks the client's own internals couldn't be reached from. Also added
+`endpointUnreachable`'s missing `{on: false}` support (mirroring `unprotected`/
+`rotateRefreshTokens`), needed to restore reachability mid-test for the recovery assertion.
+
+Worth recovering specifically (not just for coverage symmetry) because the worker path has a
+failure mode the sw path structurally can't: the offscreen document's `handleStandInFetch`
+decides, on its own, whether a Worker-reported outcome looks like a token rejection — a
+transport failure and a 401 are two different things it has to tell apart correctly. Mutation
+15 targets exactly that: made the offscreen document treat *any* Worker error (not just a 401)
+as a rejection worth reporting. It fails test 40 (`via: 'worker'`) as expected — a spurious
+`/token` request appears where the test asserts there must be none — confirming the test
+actually depends on that distinction being made correctly, not just on the offline case
+happening to produce a `TRANSPORT`-shaped outcome.
 
 ## Notes on process
 

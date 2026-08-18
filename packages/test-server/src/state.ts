@@ -22,7 +22,12 @@ export type UnreachableEndpoint =
   | 'token'
   // Missing from the original registry — needed for the checkpoint-3 review's Task 4
   // (logout must report a failed revocation attempt to the caller, not just clear state).
-  | 'revocation';
+  | 'revocation'
+  // The protected resource itself, distinct from 'resourceMetadata' — needed for the
+  // checkpoint-3 review's Task 14 (recovering test 40's 'via: worker' variant server-side,
+  // since context.setOffline() doesn't reach the stand-in Worker's own fetch in this
+  // environment).
+  | 'resource';
 
 export interface ScenarioState {
   shortLivedTokensSeconds: number | undefined;

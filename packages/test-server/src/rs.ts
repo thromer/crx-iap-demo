@@ -68,6 +68,10 @@ export function createResourceServer(
     }
 
     // Everything else is treated as "the protected resource".
+    if (state.scenarios.unreachable.has('resource')) {
+      req.socket.destroy();
+      return;
+    }
     await handleResource(req, res, url, origin, authHeader, tokens);
   }
 
