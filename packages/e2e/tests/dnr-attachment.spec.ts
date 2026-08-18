@@ -31,10 +31,19 @@ test("53: the stand-in Worker's requests carry the DNR-attached Authorization he
   expect(hit?.hadAuthorizationHeader).toBe(true);
 });
 
-// Test 54: onTokenChanged completes and the session rule is installed before getToken/login
-// resolves — a request issued immediately after resolution (no wait) carries the new token on
-// its very first attempt, not after a 401-triggered recovery.
-test('54: a Worker request issued immediately after login carries the token on the first attempt', async ({
+// Test 54: onTokenChanged's DNR sync is genuinely wired end to end — a Worker request issued
+// immediately after login eventually carries the token via the real
+// SW → chrome.declarativeNetRequest → browser network stack path, with no explicit wait.
+//
+// This proves the wiring, not the ordering guarantee behind it (that the rule is installed
+// before login/getToken resolves — Component A's "listeners are awaited before the triggering
+// call resolves"). A native DNR call can't be slowed down from here to make that race
+// observable; the ordering is instead proven deterministically at the unit level, with
+// controllable-delay fakes standing in for it: packages/iap-auth/test/client.test.ts's
+// "onTokenChanged ordering" (client-side half) and packages/extension/test/token-sync.test.ts
+// (SW-side half). See docs/mutation-check.md's mutation 8 for why (checkpoint-3 review, Task
+// 10) — same unit-proves-the-mechanism / e2e-proves-the-wiring split as test 57's disposition.
+test('54: a Worker request issued immediately after login eventually carries the token', async ({
   testServer,
   driver,
 }) => {
@@ -42,13 +51,14 @@ test('54: a Worker request issued immediately after login carries the token on t
   await establishToken(driver, origin);
 
   const before = await requestLog(testServer);
-  const outcome = await driver.standInFetch(origin, '/api/resource');
+  const outcome = await performFetch(driver, 'worker', origin, '/api/resource');
   expect(outcome.ok).toBe(true);
   if (outcome.ok) expect(outcome.status).toBe(200);
 
-  // A single hit, 200 on the first try — no 401 that would indicate a missing rule.
+  // "Eventually" — bounded by performFetch's own retry cap, not required to land on the very
+  // first attempt (that stronger claim is what this test can no longer make; see header).
   const since = (await requestLog(testServer)).slice(before.length);
-  expect(since.filter((e) => e.server === 'rs-a')).toHaveLength(1);
+  expect(since.filter((e) => e.server === 'rs-a').length).toBeLessThanOrEqual(3);
 });
 
 // Test 55: token refreshes mid-session (shortLivedTokens) -> the rule updates; a Worker request

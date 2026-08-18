@@ -340,13 +340,19 @@ export interface ViaOutcome {
  * token and updates the DNR rule asynchronously. So this helper mirrors what a real caller of
  * the stand-in library would have to do: on a 401, wait for the token to change and retry.
  * PROMPT.md documents the DNR rule-update window itself ("a request that 401s and is recovered
- * by the normal rejection path ... one round trip slower") as exactly one extra round trip —
- * but `currentTokenId` (what `waitForTokenChange` polls) updates in the SW *before*
- * `updateSessionRules` is awaited (see service-worker/index.ts's onTokenChanged listener), so a
- * retry can still land inside that narrower sub-window and 401 again. Bounded retry loop rather
- * than exactly one, to absorb that without masking a real hang (a bug would still exhaust the
- * bound and fail loudly). A non-401 failure (e.g. offline) is returned as-is, with no retry —
- * there is nothing to recover from and no classification to report.
+ * by the normal rejection path ... one round trip slower") as exactly one extra round trip.
+ *
+ * The bound below is 3, not the literal single round trip PROMPT.md's prose suggests: 1 extra
+ * attempt is empirically insufficient (tests 6 and 9, `via: 'worker'`, fail reliably at bound
+ * 2 across repeated clean runs; bound 3 passes both consistently). The gap beyond one round
+ * trip is real IPC/scheduling variance in how fast `waitForTokenChange`'s poll of
+ * `currentTokenId` observes the new value relative to when the *next* stand-in request reaches
+ * the resource server — not an ordering bug (that one is fixed; see
+ * service-worker/token-sync.ts and docs/mutation-check.md), just slop the documented "one
+ * round trip" doesn't budget for.
+ *
+ * A non-401 failure (e.g. offline) is returned as-is, with no retry — there is nothing to
+ * recover from and no classification to report.
  *
  * IMPORTANT: the stand-in Worker never logs in — `reportRejected` is only ever sent when the
  * offscreen document already has a cached tokenId for the resource (see
@@ -374,7 +380,7 @@ export async function performFetch(
   }
 
   let previous = await currentTokenId(driver, origin);
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     const result = await driver.standInFetch(origin, path, opts?.method);
     if (!result.ok) return { ok: false };
     if (result.status !== 401) return { ok: true, status: result.status };

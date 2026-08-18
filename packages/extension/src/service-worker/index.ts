@@ -14,6 +14,7 @@ import { respond } from './dispatch.ts';
 import { removeAuthorizationRule, setAuthorizationRule } from './dnr.ts';
 import { ensureOffscreenDocument } from './offscreen-manager.ts';
 import { createDurableStore, createSessionStore } from './storage.ts';
+import { syncToken } from './token-sync.ts';
 
 const client = createIapClient({
   session: createSessionStore(),
@@ -27,15 +28,13 @@ const client = createIapClient({
 const currentTokenIds = new Map<string, string | null>();
 
 client.onTokenChanged(async (resource, token, tokenId) => {
-  currentTokenIds.set(resource, tokenId);
-
-  // DNR sync: `await` inside the listener so the rule is in place before the
-  // getToken/reportRejected call that triggered this resolves.
-  if (token) {
-    await setAuthorizationRule(resource, token);
-  } else {
-    await removeAuthorizationRule(resource);
-  }
+  // Ordering (DNR rule in place before currentTokenIds is observable) is owned by syncToken
+  // and proven by its own unit tests in test/token-sync.test.ts, not by anything e2e — see
+  // that file's header and docs/mutation-check.md's mutation 8 (checkpoint-3 review, Task 10).
+  await syncToken(token, tokenId, {
+    updateRules: (t) => (t ? setAuthorizationRule(resource, t) : removeAuthorizationRule(resource)),
+    publishTokenId: (id) => currentTokenIds.set(resource, id),
+  });
 
   const broadcast: TokenChangedBroadcast = { type: 'tokenChanged', resource, tokenId };
   chrome.runtime.sendMessage(broadcast).catch(() => {
