@@ -792,7 +792,7 @@ Build in this order and **stop for review at each checkpoint**:
    doc, devise a mutation to prove that it is not vacuous and add a row to the matrix. If the
    mutation revealed a test gap, both fix the gap *and* document the discovery and fix in
    `docs/mutation-check.md`.
-6. `docs/manual-verification.md` (currently above but should become a new file).
+6. `docs/manual-verification.md` (currently some manual verification steps are above and need to be moved into that file).
 
 Each checkpoint includes `pnpm biome check` and `pnpm tsc --noEmit` passing clean across all
 touched packages.
