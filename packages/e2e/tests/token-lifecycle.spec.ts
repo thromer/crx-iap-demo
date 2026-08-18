@@ -193,6 +193,28 @@ for (const via of ['sw', 'worker'] as const) {
       await establishToken(driver, origin);
       if (via === 'worker') await realSleep(1200);
 
+      // Checkpoint-3 review, Task 11/11a. `tokenEndpointHang` stalls *every* /token request
+      // while armed, not just the first, forcing genuine overlap instead of hoping IPC latency
+      // reveals it (same reasoning as test 57 in dnr-attachment.spec.ts).
+      //
+      // This asserts end-to-end coalescing on the real stand-in library path — genuine
+      // integration value in its own right — but on 'worker' the exact count it produces is
+      // NOT proof of the single-flight lock the way it is on 'sw'. `reportRejected` clears the
+      // cached token (`writeAccessEntry(resource, null, ...)`, broadcast immediately) *before*
+      // calling `acquireToken` (the step the hang stalls) — so the first call to reach that
+      // point broadcasts null well within the hang window, and any of the other nine calls
+      // whose `tokenIdFor()` read in offscreen.ts happens after that broadcast see `null` and
+      // never send `reportRejected` at all (the `if (tokenId)` guard there). That's a real,
+      // independent coalescing mechanism — nine callers correctly declining to report because
+      // someone else has already invalidated and is refreshing — sitting in front of the lock,
+      // not the lock itself. Confirmed by mutation: removing the single-flight lock alone does
+      // NOT fail this test on 'worker' (suppression alone still coalesces to the same count),
+      // but removing suppression *and* the lock together does (see mutation-check.md's
+      // suppression mutation). The lock itself is proven at the e2e level by test 57, which
+      // drives reportRejected directly from the driver page and so bypasses suppression
+      // entirely — and at the unit level by client.test.ts's single-flight-lock tests.
+      if (via === 'worker') await armScenario(testServer, 'tokenEndpointHang', { seconds: 2 });
+
       const before = await requestLog(testServer);
       const outcomes = await Promise.all(
         Array.from({ length: 10 }, () => performFetch(driver, via, origin, '/api/resource')),
@@ -206,18 +228,7 @@ for (const via of ['sw', 'worker'] as const) {
       const tokenRequests = after
         .slice(before.length)
         .filter((e) => e.server === 'as' && e.path === '/token');
-      if (via === 'sw') {
-        // IapClient's own reportRejected/getToken path always names the SW's authoritative
-        // tokenId directly — no ambiguity, so single-flight coalesces to exactly one refresh.
-        expect(tokenRequests).toHaveLength(1);
-      } else {
-        // PROMPT.md documents this echoed-tokenId handoff as weakening idempotency under
-        // concurrency ("two rejections spanning a refresh become indistinguishable") — under
-        // ten concurrent 401s, a tokenChanged broadcast can land between one caller's 401 and
-        // its reportRejected, causing it to (correctly, per the documented tradeoff) name the
-        // *new* tokenId and trigger one extra refresh. Still tightly bounded, never per-caller.
-        expect(tokenRequests.length).toBeLessThanOrEqual(4);
-      }
+      expect(tokenRequests).toHaveLength(1);
 
       // Grant not revoked: it still works afterward.
       const final = await performFetch(driver, via, origin, '/api/resource');
@@ -236,6 +247,12 @@ for (const via of ['sw', 'worker'] as const) {
       await establishToken(driver, originB);
       if (via === 'worker') await realSleep(1200);
 
+      // Checkpoint-3 review, Task 11/11a: same forced overlap and the same offscreen
+      // suppression vs. lock attribution as test 8 — see its comment. tokenEndpointHang applies
+      // to the AS's /token endpoint regardless of resource, so it forces the same guarantee
+      // independently for originA's and originB's five concurrent calls each.
+      if (via === 'worker') await armScenario(testServer, 'tokenEndpointHang', { seconds: 2 });
+
       const before = await requestLog(testServer);
       const calls = Array.from({ length: 10 }, (_, i) =>
         performFetch(driver, via, i % 2 === 0 ? originA : originB, '/api/resource'),
@@ -250,14 +267,7 @@ for (const via of ['sw', 'worker'] as const) {
       const tokenRequests = after
         .slice(before.length)
         .filter((e) => e.server === 'as' && e.path === '/token');
-      if (via === 'sw') {
-        expect(tokenRequests).toHaveLength(2);
-      } else {
-        // Same documented tokenId-echo tradeoff as test 8's worker variant (see the comment
-        // there): under concurrency, each of the two resources' refreshes can independently
-        // pick up one extra refresh from the same race. Bounded per-resource, not per-caller.
-        expect(tokenRequests.length).toBeLessThanOrEqual(4);
-      }
+      expect(tokenRequests).toHaveLength(2);
     });
   });
 }

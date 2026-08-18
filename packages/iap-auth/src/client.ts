@@ -453,6 +453,18 @@ export function createIapClient(opts: CreateIapClientOptions): IapClient {
     async reportRejected(resource, tokenId) {
       const correlationId = newCorrelationId();
       await singleFlight.run(resource, correlationId, async () => {
+        // This read being async (session.get is IPC-bound, not an in-memory lookup)
+        // incidentally coalesces some concurrent reportRejected calls even without the lock —
+        // confirmed directly by checkpoint-3 review, Task 11a's stage-2 mutation (lock and the
+        // extension's own offscreen-suppression mechanism both removed: worker-path
+        // concurrency dropped from 10 refreshes to 2, not because anything deliberate caught
+        // it, but because most of the ten reads happened to land after the first write had
+        // already cleared the entry). Nobody chose this; it falls out of the storage API being
+        // async. Don't rely on it — the deliberate guarantees are this lock and (on the
+        // extension's worker path) offscreen suppression. If this read is ever made
+        // synchronous or served from an in-memory cache, that accidental coalescing disappears
+        // and only the deliberate mechanisms remain load-bearing, which is the correct state to
+        // already be designing for.
         const current = await readAccessEntry(resource);
         if (!current || current.tokenId !== tokenId) {
           logger.debug('classify', 'reportRejected no-op: tokenId already superseded', {

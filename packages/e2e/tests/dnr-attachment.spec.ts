@@ -8,6 +8,7 @@ import {
   realSleep,
   requestLog,
   test,
+  waitForTokenChange,
 } from '../src/fixtures.ts';
 
 // Test 53 (DNR attachment): the stand-in Worker's requests reach the RS with an Authorization
@@ -119,6 +120,20 @@ test('56: a Worker request while the rule is briefly absent recovers via the rej
 // Test 57 (DNR attachment): ten concurrent reportRejected calls naming the same tokenId ->
 // exactly one token endpoint request, exactly one rule update.
 //
+// Checkpoint-3 review, Task 11: `Promise.all()` only guarantees the ten calls are *issued*
+// together, not that they *arrive* together — real Chrome extension IPC staggers them enough
+// that, in practice, the first call often finishes its whole invalidate-then-reacquire cycle
+// before the others are even checked, so reportRejected's own idempotency check (by tokenId,
+// unrelated to the lock) coalesces them on its own. A mutation check confirmed this: removing
+// the single-flight lock entirely did not fail this test (see docs/mutation-check.md, mutation
+// 3) even though it correctly failed the in-process unit equivalent. Forcing the race open
+// deterministically instead of hoping IPC latency reveals it: `tokenEndpointHang` stalls the
+// *first* refresh's token-endpoint request for ~1s, guaranteeing the other nine calls' own
+// idempotency checks (`current.tokenId !== tokenId`) still see the original, not-yet-superseded
+// tokenId when they run — the exact condition under which idempotency alone cannot coalesce
+// them, and only the lock (serializing all ten, so the 2nd-10th see the already-updated entry
+// by the time it's their turn) can.
+//
 // "Exactly one rule update" is not independently observable without adding instrumentation to
 // the extension, which PROMPT.md's non-goals section forbids ("no test-only code, hooks,
 // flags, or conditionals in packages/extension"). It is proven by construction instead: the
@@ -135,13 +150,13 @@ test('57: ten concurrent reportRejected calls for the same tokenId coalesce into
 }) => {
   const origin = testServer.origins.rsA;
 
-  await armScenario(testServer, 'shortLivedTokens', { seconds: 1 });
   await establishToken(driver, origin);
 
   const before = await currentTokenId(driver, origin);
   expect(before).not.toBeNull();
   const tokenId = before as string;
 
+  await armScenario(testServer, 'tokenEndpointHang', { seconds: 1 });
   const beforeLog = await requestLog(testServer);
 
   const outcomes = await Promise.all(
@@ -168,6 +183,65 @@ test('57: ten concurrent reportRejected calls for the same tokenId coalesce into
     return all.filter((r) => r.condition.urlFilter === `|${rsOrigin}/*`);
   }, origin);
   expect(rules).toHaveLength(1);
+});
+
+// Test 57b (checkpoint-3 review, Task 11a): a caller suppressed by offscreen.ts's
+// null-broadcast gate (see detecting-failure.md's "Concurrent rejections" section) is waiting
+// on a tokenId that only ever arrives if the refresh that triggered suppression actually
+// completes. If that refresh fails and needs the authorization ladder to recover, does the
+// suppressed caller eventually see the new tokenId, or does it wait forever? Checked directly,
+// not assumed: arms both a genuine refresh failure (invalidGrantOnNextRefresh) and
+// tokenEndpointHang together, so the recovery path (failed refresh -> fall through to the
+// ladder -> silent re-auth -> a *second* hung /token exchange) takes several real seconds
+// before the new tokenId broadcasts — long enough that a caller relying on suppression alone
+// would be stuck waiting the whole time if anything wedged.
+//
+// Answer: it doesn't hang. The suppressed callers' wait ends once the ladder's recovery
+// completes and broadcasts, the same as any other waiter — suppression only ever defers a
+// caller's own report, never blocks it on nothing. waitForTokenChange is given a generous but
+// bounded window here specifically to prove termination, not to accommodate expected slowness.
+test('57b: a caller suppressed by offscreen null-broadcast still recovers if the in-flight refresh needs the ladder', async ({
+  testServer,
+  driver,
+}) => {
+  const origin = testServer.origins.rsA;
+  await armScenario(testServer, 'shortLivedTokens', { seconds: 1 });
+  await establishToken(driver, origin);
+  await realSleep(1200);
+
+  await armScenario(testServer, 'invalidGrantOnNextRefresh');
+  await armScenario(testServer, 'autoApprove');
+  await armScenario(testServer, 'tokenEndpointHang', { seconds: 2 });
+
+  const previous = await currentTokenId(driver, origin);
+  const before = await requestLog(testServer);
+
+  // Fire all ten concurrently, same shape as test 57/8/9: some will report, some will be
+  // suppressed by the null broadcast once the first one starts recovering.
+  const results = await Promise.all(
+    Array.from({ length: 10 }, () => driver.standInFetch(origin, '/api/resource')),
+  );
+  for (const result of results) {
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.status).toBe(401);
+  }
+
+  // Bounded, not indefinite: this must terminate, well within the two hung /token round trips
+  // (failed refresh, then the ladder's code exchange) plus real overhead.
+  const changed = await waitForTokenChange(driver, origin, previous, 20_000);
+  expect(changed).not.toBeNull();
+  expect(changed).not.toBe(previous);
+
+  const since = (await requestLog(testServer)).slice(before.length);
+  const tokenRequests = since.filter((e) => e.server === 'as' && e.path === '/token');
+  // Exactly two: the failed refresh (invalid_grant) and the ladder's successful code exchange
+  // — not more, confirming recovery doesn't loop or retry redundantly under suppression.
+  expect(tokenRequests).toHaveLength(2);
+
+  // A follow-up request now succeeds with the recovered token.
+  const followUp = await performFetch(driver, 'worker', origin, '/api/resource');
+  expect(followUp.ok).toBe(true);
+  expect(followUp.status).toBe(200);
 });
 
 // Test 58: reportRejected naming an already-superseded tokenId -> no-op, no second refresh.

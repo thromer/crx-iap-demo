@@ -99,11 +99,28 @@ around it.
 - Rewrite test 57 this way.
 - **Re-run mutation 3 against it.** It must now fail. If it does not, the test still is not
   asserting what it claims and you should report that rather than adjusting the assertion.
-- Apply the same technique to tests 8 and 9's `via: 'worker'` variants. With overlap forced, a
-  missing lock produces ten refreshes while the documented tokenId-echo race produces at most a
-  small handful — which finally separates those two causes instead of hiding both under
-  `toBeLessThanOrEqual(4)`. Tighten the bound to whatever the echo race alone can actually
-  produce, and justify that number.
+
+Then apply the same technique to tests 8 and 9's `via: 'worker'` variants, where
+`toBeLessThanOrEqual(4)` currently hides two different causes at once. With the overlap forced, a
+missing lock produces ten refreshes while the documented tokenId-echo race produces far fewer, which
+finally separates them.
+
+**Derive the new bound from the mechanism, not from observation.** Do not run the test, watch what
+number comes out, and assert slightly above it — that is how the current `4` got there, and a bound
+calibrated to this machine's scheduling will drift on slower CI and has to be raised again,
+ratcheting toward meaninglessness. Reason it out from the code instead: `reportRejected` is
+idempotent per tokenId, so each *distinct* tokenId that can be echoed during the window is worth at
+most one refresh. Work out how many distinct tokenIds can exist in that window — the stale one, plus
+however many replacements the SW can publish while the ten reports are arriving — and assert that as
+an **exact** count, with the derivation written into the test's comment so the next reader can check
+the reasoning rather than trusting the number.
+
+If the derivation comes out genuinely unbounded — if the number of publishable tokenIds depends on
+scheduling rather than on the code path — say so, and assert a different property instead: that the
+refresh count equals the number of distinct tokenIds actually reported. That is computable from the
+request log plus the tokenIds the offscreen document echoed, holds regardless of how the scheduler
+behaves, and still fails outright if the lock is missing. A timing-independent assertion of a weaker
+property beats a timing-dependent assertion of a stronger one.
 
 ### Task 12 — Construct tests 29, 30, and 31 server-side
 

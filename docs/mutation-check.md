@@ -15,6 +15,9 @@ follow-up working agreement).
 | 1 | Revert Task 1's `TRANSPORT` classification (`net.ts`'s `classifiedFetch` stops catching/wrapping) | 40 | ✅ Failed as expected — `errorClass` was `UNKNOWN` instead of `TRANSPORT` |
 | 2 | Make the single-flight lock global instead of per-resource (`lock.ts`'s `run()` uses a fixed key) | 9 | ✅ Failed as expected — one resource's refresh blocked the other's; only 1 token request instead of 2 |
 | 3 | Remove the single-flight lock entirely (`lock.ts`'s `run()` calls `fn()` directly) | 8, 57 | ⚠️ **8 failed as expected** (20 token requests instead of 1). **57 did NOT fail** — see finding below |
+| 3 (re-verified) | Same mutation, re-run after Task 11's rewrite of test 57 to force overlap via `tokenEndpointHang` (the version that replaced the one mutation 3 originally ran against) | 57, plus 8/9's `via: 'sw'` variants | ✅ **57 now fails** (10 token requests instead of 1) — the original gap is closed. 8/9 `sw` still fail as before |
+| 9a | Remove offscreen suppression alone (`offscreen.ts`'s `tokenChanged` listener ignores `tokenId: null` broadcasts) — Task 11a, stage 1 of 2 | 8, 9 (`via: 'worker'`, with `tokenEndpointHang` forcing overlap) | ✅ Neither failed — the lock alone still coalesces correctly. See finding below |
+| 9b | Same as 9a, combined with mutation 3 (lock also removed) — Task 11a, stage 2 of 2 | 8, 9 (`via: 'worker'`) | ⚠️ **8 failed, but with 2 token requests, not the ~10 mutation 3 alone produces on `sw`. 9 did NOT fail at all** (still exactly 2) — see finding below |
 | 4 | Skip the cross-origin `resource_metadata` origin check (`discovery.ts`'s `discoverResource`) | 23 | ✅ Failed as expected — client attempted the foreign origin, got `TRANSPORT` (unreachable) instead of the expected `MISCONFIGURED` from the (skipped) validation |
 | 5 | Never update the DNR rule after a refresh (`service-worker/index.ts`'s `onTokenChanged` listener, install-once-per-resource) | 55 | ✅ Failed as expected — the stand-in Worker's requests kept 401ing against the stale rule, exhausted the retry bound, `outcome.ok` was `false` |
 | 6 | Return a stale token from `getToken` after `reportRejected` (`client.ts`'s `readAccessEntry` memoizes the first read per resource, ignores later writes) | 58 | ✅ Failed as expected — the second, already-superseded `reportRejected` call triggered a second refresh instead of no-op'ing |
@@ -65,6 +68,13 @@ follow-up, not chosen yet:
   thing to prove), and treat the *lock itself* as a Component-A concern already covered
   decisively by the unit test above, documenting that division of labor explicitly in test
   57's own comment instead of implying it independently proves the lock exists.
+
+**Resolved, Task 11.** Neither option above was taken — instead, the IPC-latency dependency was
+removed entirely rather than worked around: `tokenEndpointHang` now stalls the first refresh's
+`/token` request for ~1s before the ten concurrent calls fire, guaranteeing the other nine's
+idempotency checks still see the not-yet-superseded tokenId (the exact condition idempotency
+alone cannot resolve). Mutation 3, re-run against this rewrite, now fails test 57 directly (see
+the "3 (re-verified)" row above) — the lock is proven at the e2e level, not just the unit level.
 
 ## The other that didn't: mutation 8, test 54
 
@@ -132,6 +142,56 @@ tests prove the ordering guarantee that makes it reliable.
 `dnr-attachment.spec.ts` and `token-lifecycle.spec.ts` both pass in full against the fix and
 the rewritten test 54 (29 tests, clean run), and `packages/extension`'s and
 `packages/iap-auth`'s unit suites pass with the two new/verified tests included.
+
+## Not a gap: mutations 9a/9b, tests 8 and 9's `via: 'worker'` variants
+
+With overlap forced (`tokenEndpointHang`, per Task 11), tests 8 and 9's `via: 'worker'`
+variants assert exact token-request counts (1 and 2) matching their `via: 'sw'` counterparts.
+Task 11a asked whether that count is proof of the single-flight lock on the worker path the
+way it is on `sw` — it isn't, and the two-stage mutation below shows why, without that being a
+coverage gap.
+
+**Stage 1 (mutation 9a) — remove offscreen suppression alone.** `client.ts`'s `reportRejected`
+clears the cached token (`writeAccessEntry(resource, null, ...)`, broadcast immediately)
+*before* calling `acquireToken` (the step `tokenEndpointHang` stalls). The offscreen document's
+`tokenChanged` listener normally caches that `null` right away, and any of the other nine
+callers whose `tokenIdFor()` read happens afterward see `null` and never send `reportRejected`
+at all (the `if (tokenId)` guard in `offscreen.ts`) — a real, independent coalescing mechanism,
+not the lock. Mutating the listener to ignore `null` broadcasts (so the stale tokenId stays
+cached and all ten callers still report it) left both tests passing unchanged: the lock alone
+still coalesces correctly. Expected, and confirms the lock genuinely engages on this path.
+
+**Stage 2 (mutation 9b) — also remove the lock.** With suppression *and* the lock both gone,
+token requests did not climb to ~10 (what mutation 3 alone produces on `sw`, which has no
+suppression to begin with). Test 8 failed, but with exactly 2 token requests. Test 9 did not
+fail at all — still exactly 2. Un-smoothed: this is the actual result, not the predicted one.
+
+**Why this isn't a gap:** `reportRejected`'s idempotency check is `await readAccessEntry(...)`
+followed by a comparison — and `readAccessEntry` is `chrome.storage.session` IPC, not an
+in-memory read. With both deliberate mechanisms removed, most (but, on this evidence, not
+reliably all) of the ten concurrent calls' reads still land after the first call's write has
+already cleared the entry, so they no-op anyway — coalescing by accident of storage-IPC timing,
+the same *class* of problem the original test 57 had (real IPC latency masking a missing
+safeguard), just one layer deeper (`chrome.storage.session` instead of
+`chrome.runtime.sendMessage`) and with no `tokenEndpointHang`-equivalent lever available to
+force it open (nothing server-controlled sits on that path). The 2-vs-10 result is the finding,
+not a defect: it demonstrates three independent, stacked coalescing mechanisms on the worker
+path — offscreen suppression (stage 1's evidence), this storage-read timing accident (stage 2's
+evidence), and the lock (test 57 and `client.test.ts`'s unit equivalent, decisively) — not the
+absence of one. See `packages/iap-auth/src/client.ts`'s comment at this `readAccessEntry` call
+for the standing note that this third mechanism is accidental, not designed, and could
+disappear if that read is ever made synchronous or cached in memory.
+
+**General lesson, worth keeping since this is the second time it applied:** when a mutation
+fails to produce the predicted failure, the first question is whether another layer is
+legitimately doing the work, not whether the test is broken. Test 57's original finding
+(mutation 3, above) was a genuine gap — no other mechanism was catching it, IPC latency was
+just accidentally serializing the calls closely enough, often enough, to hide that. This one
+isn't — tracing the actual mechanism (offscreen suppression, then storage-read timing) showed
+real, if partly accidental, protection actually present. Distinguishing "another layer is
+doing the work" from "nothing is doing the work and I got lucky" is the actual skill mutation
+testing is for; it means reading the code path each time a mutation surprises you, not
+adjusting the assertion to match whatever number came out.
 
 ## Notes on process
 
