@@ -2,7 +2,7 @@
 
 Checkpoint-3 review, Task 8 (mutations 1–7); Task 10 adds mutation 8; Task 12 adds mutations
 10–13; Task 13 adds mutation 14; Task 14 adds mutation 15; Task 15 adds mutation 16; Task 18
-adds mutation 17. For each mutation below: the change was applied to the real source
+adds mutation 17; Task 19 adds mutation 18. For each mutation below: the change was applied to the real source
 (test-server mutations don't need an extension rebuild; extension/iap-auth mutations do), the
 named test(s) were run against the mutated build, the result was recorded, and the mutation was
 reverted (`git checkout --` or a manual revert, confirmed clean via `git status`/`grep
@@ -37,8 +37,9 @@ here honestly, including when a mutation doesn't fail as predicted.
 | 15 | Offscreen document misreads a transport failure (Worker `fetch()` throws) as a token rejection, firing `reportRejected` (`offscreen.ts`'s `handleStandInFetch`) | 40 (`via: 'worker'`) | ✅ Failed as expected — a spurious `/token` request appeared where the test asserts none |
 | 16 | `fallbackClientId` branch never used, even when configured (`discovery.ts`'s `registerOrGetClient`) | `client.test.ts`'s "fallbackClientId > succeeds using the configured fallback client id..." | ✅ Failed as expected — same `MISCONFIGURED` error the "without a fallbackClientId" half already covers |
 | 17 | A real type error introduced in `dispatch.ts` (an extra parameter of a nonexistent type) | `yarn workspace @iap-demo/extension build` itself | ✅ Failed as expected — build exits 1, no `dist/` artifact produced, instead of silently building on the untyped-JS output the way Vite alone does |
+| 18 | `registerOrGetClient`'s client-registration cache never hits (`discovery.ts`) | 7 (`via: 'sw'` and `via: 'worker'`) | ✅ Both failed as expected — a spurious `other:/reg` entry appeared in the sequence exactly where the assertion checks for none |
 
-**16 of 18 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14, 15, 16, 17 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
+**17 of 19 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14, 15, 16, 17, 18 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
 
 ## The one that didn't: mutation 3, test 57
 
@@ -330,6 +331,48 @@ would only work against that one pre-known AS, contradicting the extension's own
 Mutation-proven (row 16): disabled the `fallbackClientId` branch in `discovery.ts` entirely —
 the new unit test fails with the same `MISCONFIGURED` error the "without a fallbackClientId"
 half already asserts, confirming the new test genuinely depends on that branch being taken.
+
+## Task 19: replacing test 7's request-count ceiling with a sequence assertion
+
+`expect(after.length - before.length).toBeLessThan(25)` was calibration, not a derivation — the
+number was raised from an initial too-tight guess, justified only by "recovery genuinely
+produces more requests than first assumed." That shape of assertion can never fail: any
+regression short of 25 passes silently, and if one ever crosses 25, the argument for raising it
+again is exactly as strong as it was the first time. It's also the wrong shape for the
+property test 7 actually cares about — termination, not request count — and a ceiling that high
+mostly just re-detects an infinite loop, which the test timeout already catches.
+
+**Derived the real shape by reading the code, then validated against an actual run rather than
+inventing the number from either alone.** Reading `client.ts`/`discovery.ts`/`authorize.ts`
+predicted one "recovery unit" (a failed refresh falling through to the silent authorization
+ladder) as 4 requests: `GET /auth`, `GET /interaction/:id`, `POST /token`. An instrumented run
+showed 5, not 4 — `GET /auth/:id` appears between the interaction resolving and the code
+exchange, an internal oidc-provider session-resumption hop back through the authorization
+endpoint that a reading of this project's own code wouldn't surface (it never originates in
+code this project owns). Corrected the derivation rather than the assertion: one recovery unit
+is 1 (failed refresh) + 4 (ladder, including the resumption hop) = 5 requests, plus 1 resource
+request each time the resource is actually hit. `via: 'sw'` hits this twice — once proactively
+(the 60s skew margin treats a 1s-lived token as already stale, so `client.fetch()` refreshes
+before ever attempting the resource) and once reactively (the retried resource request also
+401s while `revokeGrant` is armed, triggering `client.fetch()`'s one allowed reactive retry) —
+for `2 * (5 + 1) = 12`. `via: 'worker'` only ever reacts to the single `standInFetch` call's
+401 (no proactive check, and the test deliberately drives it directly rather than through
+`performFetch`'s retry loop) — for `1 * (5 + 1) = 6`. Both counts confirmed by the same
+instrumented run before being written as the assertion, not guessed and left unverified.
+
+**"Expect to find something" — found nothing wrong, which is itself the finding.** Discovery
+and DCR endpoints (`/.well-known/*`, `/reg`) appear zero times in either sequence — the caching
+that was suspect turns out to be working correctly. The 25-ceiling wasn't hiding a caching bug;
+it was hiding the actual, correct shape of recovery, `requestKind()`-classified so the sequence
+assertion doesn't couple to oidc-provider's random interaction ids: `[...RECOVERY_UNIT,
+'resource', ...RECOVERY_UNIT, 'resource']` for `sw`, `['resource', ...RECOVERY_UNIT]` for
+`worker`. Also asserts idempotent-endpoint absence directly, and keeps the derived exact count
+as a backstop with the arithmetic written into the comment.
+
+Mutation-proven (row 18): made `registerOrGetClient`'s cache check never hit, forcing a spurious
+re-registration on every call. Both `via` variants fail, at the sequence assertion specifically
+— a `other:/reg` entry appears exactly where the assertion checks for none — confirming the new
+assertion genuinely depends on the cache being effective, which no ceiling ever could.
 
 ## Notes on process
 

@@ -1,3 +1,4 @@
+import type { RequestLogEntry } from '../../test-server/src/state.ts';
 import {
   armScenario,
   currentTokenId,
@@ -9,6 +10,29 @@ import {
   test,
   watchForPage,
 } from '../src/fixtures.ts';
+
+// Checkpoint-3 review, Task 19: classifies a request log entry by its role in a recovery
+// sequence, ignoring the random interaction id in the path, so the sequence can be asserted
+// exactly without the assertion being coupled to oidc-provider's internal id generation.
+function requestKind(e: RequestLogEntry): string {
+  if (e.server !== 'as') return 'resource';
+  if (e.path === '/token') return 'token';
+  if (e.path === '/auth') return 'auth-start';
+  if (e.path.startsWith('/interaction/')) return 'interaction';
+  if (e.path.startsWith('/auth/')) return 'auth-resume';
+  return `other:${e.path}`;
+}
+
+// One "recovery unit": a refresh attempt that fails (invalid_grant, GRANT_DEAD) and falls
+// through to the silent authorization ladder. The ladder is 4 requests server-side, not the 3
+// a reading of authorize.ts alone would suggest — confirmed directly, not assumed, since
+// oidc-provider's own interaction-resolution flow includes an internal session-resumption hop
+// this project's own code doesn't originate: GET /auth (initiate) -> GET /interaction/:id
+// (resolve; autoApprove means this redirects immediately, no submit step) -> GET /auth/:id
+// (oidc-provider redirects back through the authorization endpoint to finish the response) ->
+// POST /token (code exchange). So one recovery unit is 1 (failed refresh) + 4 (ladder) = 5
+// requests.
+const RECOVERY_UNIT = ['token', 'auth-start', 'interaction', 'auth-resume', 'token'];
 
 // Tests 1-9 (token lifecycle). PROMPT.md requires this group to run twice: once through the
 // SW's own fetch() classify/retry ladder (via: 'sw'), once through the stand-in Worker's
@@ -178,9 +202,38 @@ for (const via of ['sw', 'worker'] as const) {
       const after = await requestLog(testServer);
 
       expect(page).toBeNull();
-      // The bound just needs to rule out an unbounded loop; the exact count depends on how
-      // many discrete steps one recovery attempt takes (refresh + silent re-auth dance).
-      expect(after.length - before.length).toBeLessThan(25);
+
+      const since = after.slice(before.length);
+      const kinds = since.map(requestKind);
+
+      // Assert the sequence shape, not just a count: a spurious extra discovery/registration
+      // hit, a missing refresh attempt, or an extra ladder round are all caught here, none of
+      // which a bare ceiling (the previous `toBeLessThan(25)`) could ever distinguish from a
+      // correct-but-slow recovery.
+      const expected =
+        via === 'sw'
+          ? [...RECOVERY_UNIT, 'resource', ...RECOVERY_UNIT, 'resource']
+          : ['resource', ...RECOVERY_UNIT];
+      expect(kinds).toEqual(expected);
+
+      // Idempotent endpoints (discovery, DCR) are cached from establishToken() and must not be
+      // re-fetched during recovery — a real caching bug would show up as extra entries here,
+      // invisible beneath any ceiling under 25.
+      expect(since.filter((e) => e.path.startsWith('/.well-known'))).toHaveLength(0);
+      expect(since.filter((e) => e.path === '/reg')).toHaveLength(0);
+
+      // Derived backstop, not recalibrated to whatever the code happens to do: 5 requests per
+      // recovery unit (1 failed refresh + 4-step ladder — see RECOVERY_UNIT's comment) + 1
+      // resource request. 'sw' hits this twice — once proactively (the 60s skew margin treats
+      // the 1s-lived token as already stale, so client.fetch() refreshes before ever attempting
+      // the resource) and once reactively (the retried resource request also 401s while
+      // revokeGrant is armed, triggering client.fetch()'s one allowed reactive retry) — for
+      // 2 * (5 + 1) = 12. 'worker' only ever reacts to the single standInFetch call's 401 (no
+      // proactive check, and this test deliberately drives it directly rather than through
+      // performFetch's retry loop) — for 1 * (5 + 1) = 6.
+      const expectedCount =
+        via === 'sw' ? 2 * (RECOVERY_UNIT.length + 1) : RECOVERY_UNIT.length + 1;
+      expect(since).toHaveLength(expectedCount);
     });
 
     test('8: ten concurrent fetches on an expired token coalesce into one refresh; grant survives', async ({
