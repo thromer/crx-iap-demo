@@ -140,6 +140,17 @@ async function handleTokenEndpoint(
     await delay(state.scenarios.tokenEndpointHangSeconds);
   }
 
+  if (grantType === 'authorization_code') {
+    if (state.scenarios.rejectCodeExchange) {
+      state.scenarios.rejectCodeExchange = false;
+      sendJson(res, 400, {
+        error: 'invalid_grant',
+        error_description: 'scenario: rejectCodeExchange',
+      });
+      return;
+    }
+  }
+
   if (grantType === 'refresh_token') {
     if (state.scenarios.invalidGrantOnNextRefresh) {
       state.scenarios.invalidGrantOnNextRefresh = false;
@@ -202,11 +213,23 @@ async function injectForeignCode(
   if (typeof clientId !== 'string') throw new Error('interaction missing client_id');
   const redirectUri = interaction.params['redirect_uri'];
   if (typeof redirectUri !== 'string') throw new Error('interaction missing redirect_uri');
+  const resourceParam = interaction.params['resource'];
+  if (typeof resourceParam !== 'string') throw new Error('interaction missing resource');
 
-  // A grant for the decoy client, whose resulting code is then handed to the real
-  // client's redirect_uri: the code-injection attack RFC 9700 / PKCE defends against.
+  // A grant for the decoy client, whose resulting code is then handed to the real client's
+  // redirect_uri: the code-injection attack RFC 9700 defends against. Deliberately bound to
+  // *this* interaction's own code_challenge (the real client's own PKCE value for this
+  // attempt), not a mismatched one — verified by tracing oidc-provider's own token-endpoint
+  // handler (packages/test-server, checkpoint-3 review, Task 12): findGrantSource() and
+  // validateGrant() both check the code/grant's clientId against the presenting client before
+  // checkPKCE() ever runs, so a decoy-client code is rejected on client-identity binding,
+  // structurally before PKCE verification is reached at all. That's still a real, correct
+  // RFC 9700 defense — code binding to the client that requested it — just not the same one
+  // PKCE (code_verifier matching) provides; the two are complementary defenses against
+  // adjacent attacks, and this scenario exercises the former.
   const decoyGrant = new provider.Grant({ accountId: TEST_ACCOUNT_ID, clientId: DECOY_CLIENT_ID });
   decoyGrant.addOIDCScope('openid');
+  decoyGrant.addResourceScope(resourceParam, 'openid');
   const grantId = await decoyGrant.save();
 
   const codeChallenge = interaction.params['code_challenge'];
@@ -216,14 +239,100 @@ async function injectForeignCode(
     client: decoyClient,
     codeChallenge: typeof codeChallenge === 'string' ? codeChallenge : undefined,
     codeChallengeMethod: typeof codeChallengeMethod === 'string' ? codeChallengeMethod : undefined,
-    expiresWithSession: true,
     grantId,
     redirectUri,
+    resource: resourceParam,
     scope: 'openid',
   });
   const codeValue = await code.save();
 
   const target = new URL(redirectUri);
+  target.searchParams.set('code', codeValue);
+  const stateParam = interaction.params['state'];
+  if (typeof stateParam === 'string') target.searchParams.set('state', stateParam);
+  res.writeHead(302, { location: target.toString() });
+  res.end();
+}
+
+// Checkpoint-3 review, Task 12: shared by tamperState and reissuePreviousCode, both of which
+// need to mint a real, correctly-bound authorization code for the actual client (unlike
+// injectForeignCode's decoy grant) so that the property under test is isolated to what each
+// scenario deliberately corrupts afterward — the state value or the code's reuse — not PKCE
+// binding, which stays correct here.
+async function mintRealCode(
+  provider: Provider,
+  interaction: InteractionDetails,
+): Promise<{ codeValue: string; redirectUri: string }> {
+  const clientId = interaction.params['client_id'];
+  if (typeof clientId !== 'string') throw new Error('interaction missing client_id');
+  const client = await provider.Client.find(clientId);
+  if (!client) throw new Error('client not registered');
+  const redirectUri = interaction.params['redirect_uri'];
+  if (typeof redirectUri !== 'string') throw new Error('interaction missing redirect_uri');
+
+  const resourceParam = interaction.params['resource'];
+  if (typeof resourceParam !== 'string') throw new Error('interaction missing resource');
+
+  const grant = new provider.Grant({ accountId: TEST_ACCOUNT_ID, clientId });
+  grant.addOIDCScope('openid offline_access');
+  grant.addResourceScope(resourceParam, 'openid offline_access');
+  const grantId = await grant.save();
+
+  const codeChallenge = interaction.params['code_challenge'];
+  const codeChallengeMethod = interaction.params['code_challenge_method'];
+  const code = new provider.AuthorizationCode({
+    accountId: TEST_ACCOUNT_ID,
+    client,
+    codeChallenge: typeof codeChallenge === 'string' ? codeChallenge : undefined,
+    codeChallengeMethod: typeof codeChallengeMethod === 'string' ? codeChallengeMethod : undefined,
+    grantId,
+    redirectUri,
+    resource: resourceParam,
+    scope: 'openid offline_access',
+  });
+  const codeValue = await code.save();
+  return { codeValue, redirectUri };
+}
+
+// Test 29: the AS rewrites `state` in the redirect before returning it — the client's own
+// `state` was never touched, so `validateAuthResponse` must reject the mismatch before any
+// token request is ever issued.
+async function tamperState(
+  provider: Provider,
+  res: ServerResponse,
+  interaction: InteractionDetails,
+): Promise<void> {
+  const { codeValue, redirectUri } = await mintRealCode(provider, interaction);
+  const target = new URL(redirectUri);
+  target.searchParams.set('code', codeValue);
+  target.searchParams.set('state', 'tampered-state-value');
+  res.writeHead(302, { location: target.toString() });
+  res.end();
+}
+
+// Test 31: the first interaction under this scenario mints and remembers a real code; every
+// subsequent one reuses it instead of minting fresh, with *this* request's own `state` (so
+// state validation passes and the failure is isolated to the code itself). Whether the token
+// endpoint ultimately rejects it as already-consumed (node-oidc-provider's single-use
+// enforcement) or as a PKCE mismatch against this request's own fresh code_verifier is not
+// distinguished here — either is a correct rejection of a replayed code, which is the only
+// property being asserted.
+async function reissuePreviousCode(
+  provider: Provider,
+  res: ServerResponse,
+  interaction: InteractionDetails,
+): Promise<void> {
+  const redirectUriParam = interaction.params['redirect_uri'];
+  if (typeof redirectUriParam !== 'string') throw new Error('interaction missing redirect_uri');
+
+  let codeValue = state.reissuedCode;
+  if (!codeValue) {
+    const minted = await mintRealCode(provider, interaction);
+    codeValue = minted.codeValue;
+    state.reissuedCode = codeValue;
+  }
+
+  const target = new URL(redirectUriParam);
   target.searchParams.set('code', codeValue);
   const stateParam = interaction.params['state'];
   if (typeof stateParam === 'string') target.searchParams.set('state', stateParam);
@@ -266,6 +375,16 @@ async function handleInteractionGet(
 
   if (state.scenarios.injectForeignCode) {
     await injectForeignCode(provider, res, interaction);
+    return;
+  }
+
+  if (state.scenarios.tamperState) {
+    await tamperState(provider, res, interaction);
+    return;
+  }
+
+  if (state.scenarios.reissuePreviousCode) {
+    await reissuePreviousCode(provider, res, interaction);
     return;
   }
 

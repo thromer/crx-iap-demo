@@ -49,6 +49,9 @@ export interface ScenarioState {
   denyAuthorization: boolean;
   stallAuthorizationSeconds: number | undefined;
   injectForeignCode: boolean;
+  tamperState: boolean;
+  rejectCodeExchange: boolean;
+  reissuePreviousCode: boolean;
 
   tokenEndpointStatus: { code: number; retryAfter: number | undefined } | undefined;
   tokenEndpointHangSeconds: number | undefined;
@@ -84,6 +87,9 @@ export function defaultScenarioState(): ScenarioState {
     denyAuthorization: false,
     stallAuthorizationSeconds: undefined,
     injectForeignCode: false,
+    tamperState: false,
+    rejectCodeExchange: false,
+    reissuePreviousCode: false,
 
     tokenEndpointStatus: undefined,
     tokenEndpointHangSeconds: undefined,
@@ -97,10 +103,16 @@ class TestServerState {
   requestLog: RequestLogEntry[] = [];
   private seq = 0;
 
+  // Captured, not a toggle: the first authorization code minted while `reissuePreviousCode`
+  // is armed, replayed for every subsequent interaction under that same scenario (checkpoint-3
+  // review, Task 12, test 31).
+  reissuedCode: string | undefined;
+
   reset(): void {
     this.scenarios = defaultScenarioState();
     this.requestLog = [];
     this.seq = 0;
+    this.reissuedCode = undefined;
   }
 
   logRequest(entry: Omit<RequestLogEntry, 'seq' | 'timestamp'>): void {

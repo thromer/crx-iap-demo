@@ -118,6 +118,15 @@ const scenarioHandlers: Record<string, (args: ScenarioArgs) => void> = {
   injectForeignCode: () => {
     state.scenarios.injectForeignCode = true;
   },
+  tamperState: () => {
+    state.scenarios.tamperState = true;
+  },
+  rejectCodeExchange: () => {
+    state.scenarios.rejectCodeExchange = true;
+  },
+  reissuePreviousCode: (args) => {
+    state.scenarios.reissuePreviousCode = bool(args, 'on', true);
+  },
   tokenEndpointStatus: (args) => {
     const code = num(args, 'code');
     const retryAfter = 'retryAfter' in args ? num(args, 'retryAfter') : undefined;

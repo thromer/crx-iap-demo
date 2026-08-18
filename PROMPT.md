@@ -787,7 +787,12 @@ Build in this order and **stop for review at each checkpoint**:
    57 — one from each group, chosen to prove the harness can reach everything it needs before
    you invest in the other fifty. **Checkpoint.**
 4. The remaining tests, including the `via: 'sw' | 'worker'` parameterization.
-5. `docs/manual-verification.md`.
+5. Review `docs/mutation-check.md` for completeness. Comply with the project-level memory
+   `project-mutation-check-requirement` -- in brief, for each test not covered in the matrix in the
+   doc, devise a mutation to prove that it is not vacuous and add a row to the matrix. If the
+   mutation revealed a test gap, both fix the gap *and* document the discovery and fix in
+   `docs/mutation-check.md`.
+6. `docs/manual-verification.md` (currently above but should become a new file).
 
 Each checkpoint includes `pnpm biome check` and `pnpm tsc --noEmit` passing clean across all
 touched packages.

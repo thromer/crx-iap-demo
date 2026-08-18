@@ -1,12 +1,15 @@
 # Mutation check
 
-Checkpoint-3 review, Task 8 (mutations 1–7); Task 10 adds mutation 8. For each mutation below:
-the change was applied to the real source, the extension was rebuilt, the named test(s) were
-run against the mutated build, the result was recorded, and the mutation was reverted via
-`git checkout --` before moving to the next row (confirmed clean via `git status` between
-mutations — none compounded). Every mutation was exercised individually, never combined. This
-document is kept current across review rounds, not treated as a one-off (per the checkpoint-3
-follow-up working agreement).
+Checkpoint-3 review, Task 8 (mutations 1–7); Task 10 adds mutation 8; Task 12 adds mutations
+10–13. For each mutation below: the change was applied to the real source (test-server
+mutations don't need an extension rebuild; extension/iap-auth mutations do), the named test(s)
+were run against the mutated build, the result was recorded, and the mutation was reverted
+(`git checkout --` or a manual revert, confirmed clean via `git status`/`grep MUTATION` before
+moving to the next row — none compounded). Every mutation was exercised individually, never
+combined. This document is kept current across review rounds, not treated as a one-off — a
+standing project working agreement (`project_mutation_check_requirement` memory): every new or
+materially modified test gets a mutation proving it non-vacuous, logged here honestly,
+including when a mutation doesn't fail as predicted.
 
 ## Results
 
@@ -25,8 +28,12 @@ follow-up working agreement).
 | 8a | Fire-and-forget the DNR update in `onTokenChanged` (`service-worker/index.ts`, before the `syncToken()` extraction) | 54 (e2e) | ❌ **Did NOT fail** — see finding below |
 | 8b | Fire-and-forget `updateRules` inside `syncToken()` itself (`token-sync.ts`, `await effects.updateRules(...)` → `void effects.updateRules(...)`) | `syncToken()` unit tests (`token-sync.test.ts`) | ✅ Failed as expected — `publishTokenId` observed `rulesUpdated === false` |
 | 8c | Fire-and-forget the listener loop in `writeAccessEntry` (`client.ts`, `await listener(...)` → `void listener(...)`) | `client.test.ts`'s "onTokenChanged ordering > awaits listeners before getToken resolves" (pre-existing, from Tasks 1–4) | ✅ Failed as expected — `listenerFinished` was still `false` when `getToken` resolved |
+| 10 | `tamperState` echoes the real `state` instead of tampering it (`as.ts`) | 29 | ✅ Failed as expected — `outcome.ok` was `true` (untampered flow succeeds normally) |
+| 11 | `rejectCodeExchange`'s branch never fires (`as.ts`'s token endpoint handler) | 30 | ✅ Failed as expected — `outcome.ok` was `true` on the first exchange |
+| 12 | `reissuePreviousCode` always mints fresh instead of reusing the captured code (`as.ts`) | 31 | ✅ Failed as expected — the second login's replayed-code attempt succeeded instead of failing |
+| 13 | `injectForeignCode`'s branch never fires (`as.ts`) | 34 | ✅ Failed as expected — `outcome.ok` was `true` (the real client's own normal login succeeds when nothing is injected) |
 
-**8 of 10 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
+**12 of 14 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
 
 ## The one that didn't: mutation 3, test 57
 
@@ -192,6 +199,60 @@ real, if partly accidental, protection actually present. Distinguishing "another
 doing the work" from "nothing is doing the work and I got lucky" is the actual skill mutation
 testing is for; it means reading the code path each time a mutation surprises you, not
 adjusting the assertion to match whatever number came out.
+
+## Tests 29-31 (Task 12) and a pre-existing mislabel found while building them: test 34
+
+Tests 29 (`tamperState`), 30 (`rejectCodeExchange`), and 31 (`reissuePreviousCode`) are new
+this round, constructed server-side per Task 12 — the client's own `state`/`code_verifier`
+are internal and un-externalized, but the authorization server is a fake this project controls
+entirely, so all three attacks are constructible from the control plane with zero client or
+extension changes. All three are mutation-proven above (rows 10-12): tampering removed, code
+exchange rejection removed, and code reuse removed each independently break the corresponding
+test.
+
+Building `tamperState` and `reissuePreviousCode` required minting a real, correctly-bound
+authorization code server-side (`mintRealCode` in `as.ts`) — and getting this working exposed
+two things a manually-minted `AuthorizationCode` needs that `provider.interactionFinished()`'s
+normal path supplies implicitly and easily go unnoticed:
+- `expiresWithSession: true` requires a resolvable `sessionUid`; a manually-minted code never
+  has one, so the code fails to be *found at all* at exchange time (`invalid_grant`), before
+  any of the property actually being tested is reached. Fixed by not setting it (these codes
+  don't need session-expiry semantics).
+- The code needs its own `resource` field set explicitly (RFC 8707) — a grant-level
+  `addResourceScope()` alone isn't enough. Without it, exchange fails with `invalid_target`,
+  again before the property under test is reached.
+
+**This directly implicated test 34** (`injectForeignCode`, pre-existing from an earlier round,
+not previously mutation-checked — a genuine gap `project_mutation_check_requirement` exists to
+close): it uses the same manual-mint pattern and had neither fix. Verifying it (Task 12's
+explicit follow-up, not assumed) found two layered problems, not one:
+
+1. **The construction bug applied here too.** `injectForeignCode`'s decoy code also had
+   `expiresWithSession: true` and no `resource` field, so — before this pass — it was very
+   likely being rejected for the *same* not-found/no-resource reason as 29/31 initially were,
+   not the PKCE mismatch its comment claimed. Fixed identically (dropped `expiresWithSession`,
+   added `resource`).
+2. **Even with the construction bug fixed, the test still doesn't exercise PKCE.** The decoy
+   code is deliberately bound to *this interaction's own* `code_challenge` (the real client's
+   own PKCE value for this attempt) — so if PKCE verification were what ran, it would actually
+   *match*. Tracing `node-oidc-provider`'s token-endpoint handler
+   (`node_modules/oidc-provider/lib/actions/grants/authorization_code.js` and
+   `helpers/grant_common.js`) shows `findGrantSource()` and `validateGrant()` both check the
+   code/grant's client identity against the client presenting it, and both run *before*
+   `checkPKCE()`. A decoy-client code is rejected on client-identity binding — PKCE is
+   structurally unreachable in this scenario, by code order, not by observation. This is a
+   real, correct RFC 9700 defense (binding a code to the client that requested it) — just not
+   the one the test's comment claimed.
+
+**Disposition:** fixed the construction bug, corrected the comments in both `as.ts` and the
+test itself to describe client-identity binding accurately, and noted the resulting gap this
+exposes (no test here isolates genuine PKCE `code_verifier` mismatch in isolation — a scenario
+with correct client identity but a wrong/foreign `code_challenge`, not yet built) rather than
+letting the corrected label quietly imply nothing changed. Mutation-proven (row 13): disabling
+`injectForeignCode` entirely makes test 34 fail, confirming it depends on the scenario firing —
+the client-identity-binding property it actually tests. No coverage was lost; it was
+mislabeled, and the mislabeling had gone unnoticed specifically because the test had never been
+mutation-checked before.
 
 ## Notes on process
 
