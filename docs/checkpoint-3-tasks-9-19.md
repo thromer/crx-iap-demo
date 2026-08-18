@@ -223,16 +223,46 @@ means a type error can reach the tested artifact. Add `tsc --noEmit`
 as a gate in the extension's build script, so the artifact the suite
 loads is one that typechecks.
 
-### Task 19 — Sanity-check test 7's request budget
+### Task 19 — Replace test 7's request-count ceiling with a sequence assertion
 
-The bound was corrected upward to `< 25` after observing that recovery from `revokeGrant` —
-failed refresh, full silent authorization ladder, final retry — genuinely produces that many
-requests. The spec asked for a bound, so this is compliant.
+Test 7 currently asserts `expect(after.length - before.length).toBeLessThan(25)`. PROMPT.md
+asked for a bound rather than an exact count, so this is nominally compliant — but the number
+has no derivation behind it. It was raised from an initial guess because the guess was too
+tight, justified observationally ("recovery genuinely produces more requests than first
+assumed"). That is calibration to whatever the code happens to do, which means the assertion
+can never fail: any regression adding requests short of 25 passes silently, and if one ever
+crosses 25, the argument for raising it again is exactly as strong as it was the first time.
 
-But 25 is a lot for one recovery. Count what a correct recovery *should* require and compare
-against the log. If the excess is redundant discovery or re-registration that caching should have
-prevented, that is a real inefficiency worth fixing and the bound should come down. If it is
-inherent, record the breakdown in a comment so the next reader does not have to re-derive it.
+It is also the wrong shape for the property. Test 7's real subject is **termination** — that
+`revokeGrant` recovery converges instead of looping. A ceiling of 25 is so far above any
+plausible correct recovery that it mostly detects infinite loops, which the test timeout
+already catches.
+
+Do not tighten the number. Replace the approach.
+
+**Assert the request sequence.** A correct `revokeGrant` recovery has a knowable shape: failed
+refresh → silent authorization ladder (discovery and authorization as required) → token
+exchange → retried resource request. The request log records method, origin, and path, so
+assert that the sequence of endpoint kinds matches the expected recovery path. This fails on a
+spurious extra discovery or a duplicated registration, which no ceiling under 25 will ever
+catch, and it documents what recovery is supposed to look like for the next reader.
+
+**Assert idempotent endpoints are hit at most once.** Discovery and DCR are cached by design.
+If recovery re-fetches AS metadata or re-registers the client, the cache is not working — a
+real bug, currently invisible beneath the ceiling.
+
+**Keep a count only as a derived backstop.** Sum the expected sequence, add the documented
+retry, and write the arithmetic into the comment. A number with a derivation is checkable; one
+calibrated to a machine is not.
+
+**Expect to find something.** Roughly twenty requests for a single recovery is enough that
+redundant discovery or re-registration is a live possibility. If that is what is happening, it
+is a caching bug that has been sitting under this assertion since it was written — fix it, and
+the derived count will come down on its own rather than by adjustment.
+
+**Add a mutation-check row.** Break the discovery or registration cache so recovery re-fetches,
+and confirm the new assertion fails. If it does not, the sequence assertion is not capturing
+what it claims.
 
 ---
 
