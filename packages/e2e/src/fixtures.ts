@@ -1,23 +1,32 @@
 // Playwright fixtures for the extension e2e suite (PROMPT.md "Component D").
 //
-// Three deliberate deviations from PROMPT.md's Component D snippet, confirmed empirically in
-// this sandboxed dev environment (the first two at checkpoint 2, via
-// packages/extension/scripts/verify-primitives.mjs, and re-confirmed here; the third found
-// while building this fixture file):
+// Seven Chrome/Playwright environment findings from building this fixture file and the tests
+// on top of it, numbered to match MEMORY.md's crx-iap-e2e-chrome-quirks entry verbatim
+// (checkpoint-3 review, Task 17 — the two had drifted out of sync: this header was missing
+// finding 2 as a numbered item, silently shifting every finding after it by one):
 //
 //   1. `channel: 'chrome'` (real Google Chrome) refuses to load an unpacked extension via
 //      `--load-extension` at all in this environment — the service worker never registers.
 //      Playwright's bundled Chromium loads it fine, so `channel` is omitted below. This is an
 //      environment/launch-config difference only; it does not change the tested artifact.
-//   2. `chrome.runtime.sendMessage(...)` called from *inside* `worker.evaluate()` — i.e. sender
-//      and the service worker's own `onMessage` listener are the same JS context — fails with
-//      "Could not establish connection. Receiving end does not exist." Driving is therefore
-//      routed through a page context (a popup.html tab held open for the test's duration) via
-//      `page.evaluate()`, exactly as the popup itself would do. `worker.evaluate()` is still
-//      used for pure *observation* (chrome.storage.*.get(), chrome.declarativeNetRequest
-//      inspection), which works fine — PROMPT.md's own guidance already prefers request-log
-//      assertions over these anyway.
-//   3. After `ServiceWorker.stopAllWorkers` succeeds, `context.serviceWorkers()` does not shrink
+//   2. Playwright's default launch args include `--disable-extensions`, which wins over
+//      `--disable-extensions-except` / `--load-extension` regardless of argument order.
+//      `ignoreDefaultArgs: ['--disable-extensions']` (below) is required to load the extension
+//      at all.
+//   3. **Spec correction, not an environment quirk** (checkpoint-3 review, Task 17 — previously
+//      filed as quirk-shaped, which invited re-testing it after a Chrome upgrade; it never
+//      will pass, on any version): `chrome.runtime.sendMessage(...)` called from *inside*
+//      `worker.evaluate()` — i.e. sender and the service worker's own `onMessage` listener are
+//      the same JS context — fails with "Could not establish connection. Receiving end does
+//      not exist." This is documented Chrome behavior (a script never receives its own
+//      `sendMessage`), not an environment-specific quirk; PROMPT.md's Component D snippet,
+//      which drives via `sendMessage(...)` from inside `worker.evaluate()`, was simply wrong.
+//      Driving is instead routed through a page context (a popup.html tab held open for the
+//      test's duration) via `page.evaluate()`, exactly as the popup itself would do.
+//      `worker.evaluate()` is still used for pure *observation* (chrome.storage.*.get(),
+//      chrome.declarativeNetRequest inspection), which works fine — PROMPT.md's own guidance
+//      already prefers request-log assertions over these anyway.
+//   4. After `ServiceWorker.stopAllWorkers` succeeds, `context.serviceWorkers()` does not shrink
 //      here — it keeps listing the dead worker — and PROMPT.md's claim that a dead handle's
 //      `evaluate()` "throws" doesn't hold either: it hangs indefinitely instead of rejecting.
 //      An earlier version of `stopServiceWorker()` below raced the old handle's `evaluate()`
@@ -27,7 +36,7 @@
 //      had actually stopped. Replaced with CDP `Target.getTargets`, polled — direction-validated
 //      (confirmed the service_worker target both disappears on stop and reappears on wake) —
 //      see `stopServiceWorker`'s own doc comment below.
-//   4. PROMPT.md's `wakeWorker()` recipe — open popup.html, wait for a fresh 'serviceworker'
+//   5. PROMPT.md's `wakeWorker()` recipe — open popup.html, wait for a fresh 'serviceworker'
 //      event — does not work here: this extension's popup only reads chrome.storage on load
 //      (see src/popup/popup.ts), never sends a chrome.runtime message, and merely loading a
 //      chrome-extension:// page does not itself respawn a stopped service worker in this
@@ -39,9 +48,11 @@
 //   6. `context.setOffline(true)` blocks a page-level `fetch()` in this environment but does
 //      NOT block the stand-in's dedicated Worker fetch, spawned from the extension's offscreen
 //      document — confirmed directly via a message-level check. Playwright's offline network
-//      emulation apparently doesn't reach that target here. The `via: 'worker'` variant of the
-//      offline test (transport.spec.ts, test 40) is skipped with this explanation rather than
-//      silently passing on a request that was never actually blocked.
+//      emulation apparently doesn't reach that target here. Recovered rather than left skipped
+//      (checkpoint-3 review, Task 14): the `via: 'worker'` variant of the offline test
+//      (transport.spec.ts, test 40) now uses `endpointUnreachable` on the resource server
+//      instead of `context.setOffline`, since that property is reachable server-side even
+//      though this one isn't client-side.
 //   7. `chrome.runtime.reload()` (a real, unmodified extension API, not a hook) unloads the
 //      extension and never re-registers it here — `--load-extension` /
 //      `--disable-extensions-except` are one-time load-at-launch flags in this environment, not
@@ -50,8 +61,8 @@
 //      even after a 5s wait. Test 13 (process-lifecycle.spec.ts) is skipped with this
 //      explanation.
 //
-// See MEMORY.md's crx-iap-e2e-chrome-quirks entry for the checkpoint-2 findings this confirms;
-// it has been updated with findings 3-7 above.
+// See MEMORY.md's crx-iap-e2e-chrome-quirks entry for the checkpoint-2 origin of findings 1-2
+// and the full history; this header is the reference implementation for all seven.
 
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
