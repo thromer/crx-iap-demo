@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "pretest": "yarn workspace @iap-demo/extension build",
-    "test": "playwright test",
+    "test": "wlheadless-run -c weston --log=/dev/null -- playwright test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
