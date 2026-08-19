@@ -182,14 +182,25 @@ test('22: a redirect to an HTML login page probes as unsupported, not parsed as 
   expect(outcome.kind).toBe('unsupported');
 });
 
-// Test 24: issuerMismatch -> rejected.
+// Test 24: issuerMismatch -> rejected. This is oauth4webapi's processDiscoveryResponse
+// comparing the metadata's `issuer` field against the issuer URL the client actually fetched it
+// from (packages/iap-auth/src/discovery.ts) — client-side, before registration or authorization
+// are ever attempted. Asserted structurally below (checkpoint-3 review, Task 20's sweep): no
+// /reg or /auth request follows, so a plausible earlier check (e.g. a metadata fetch/parse
+// failure) isn't what actually rejected this.
 test('24: an AS metadata issuer mismatch is rejected', async ({ testServer, driver }) => {
   const resource = `${testServer.origins.rsA}/api/resource`;
   await armScenario(testServer, 'issuerMismatch');
 
+  const before = await requestLog(testServer);
   const outcome = await driver.send<FetchOutcome>({ type: 'fetch', resource });
   expect(outcome.ok).toBe(false);
   if (!outcome.ok) expect(outcome.errorClass).toBe('MISCONFIGURED');
+
+  const since = (await requestLog(testServer)).slice(before.length);
+  expect(since.some((e) => e.server === 'as' && (e.path === '/reg' || e.path === '/auth'))).toBe(
+    false,
+  );
 });
 
 // Test 25: emptyAuthorizationServers -> MISCONFIGURED.

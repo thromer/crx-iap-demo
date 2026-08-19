@@ -1,10 +1,22 @@
+import * as crypto from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import https from 'node:https';
-import Provider, { type Configuration, type InteractionDetails } from 'oidc-provider';
+import Provider, {
+  type Configuration,
+  type InteractionDetails,
+  type KoaContext,
+} from 'oidc-provider';
 import type { GeneratedCertificates } from './certs/generate.ts';
 import { ORIGINS } from './config.ts';
 import { bearerTokenId } from './hash.ts';
-import { delay, readRawBody, replayableRequest, sendJson, sendMalformed } from './http.ts';
+import {
+  captureResponseErrorCode,
+  delay,
+  readRawBody,
+  replayableRequest,
+  sendJson,
+  sendMalformed,
+} from './http.ts';
 import type { TokenValidation, TokenValidator } from './rs.ts';
 import { state } from './state.ts';
 
@@ -79,6 +91,29 @@ function buildConfiguration(): Configuration {
       url: (_ctx, interaction) => `/interaction/${interaction.uid}`,
     },
   };
+}
+
+// The `error` field alone (captureResponseErrorCode) isn't enough to distinguish different
+// rejection causes at the /token endpoint: oidc-provider's own InvalidGrant class is thrown for
+// both a client-identity mismatch (findGrantSource) and a PKCE code_verifier mismatch
+// (checkPKCE), and both surface as the identical, generic `{error: "invalid_grant",
+// error_description: "grant request is invalid"}` — checked directly against the actual
+// library source (node_modules/oidc-provider/lib/helpers/errors.js,
+// lib/helpers/err_out.js), not assumed. The *unstripped* detail (`error_detail`, set from
+// whatever string or `cause.message` was thrown, e.g. "client mismatch") is carried on the
+// `grant.error` event oidc-provider emits — server-side only, deliberately never sent to the
+// client (RFC 6749's generic-error-response guidance) — checkpoint-3 review, Task 20.
+// Registered and torn down per request, correlated to *this* request specifically via
+// `ctx.res === res` so a concurrent request's error is never misattributed.
+function captureGrantErrorDetail(provider: Provider, res: ServerResponse, seq: number): () => void {
+  const listener = (ctx: KoaContext, err: unknown) => {
+    if (ctx.res !== res) return;
+    const e = err as { error_detail?: unknown; message?: unknown; error?: unknown };
+    const detail = e.error_detail ?? e.message ?? e.error;
+    if (typeof detail === 'string') state.setRequestErrorCode(seq, detail);
+  };
+  provider.on('grant.error', listener);
+  return () => provider.off('grant.error', listener);
 }
 
 export function createTokenValidator(provider: Provider): TokenValidator {
@@ -326,13 +361,67 @@ async function tamperState(
   res.end();
 }
 
+// Test 34a: a code correctly bound to the real client_id and redirect_uri, with this
+// interaction's own `state` echoed unchanged — everything injectForeignCode's decoy grant
+// deliberately isn't — except the code_challenge, which is the AS's own, unrelated to the
+// client's real code_verifier. Isolates a genuine PKCE code_verifier mismatch: rejection must
+// come from checkPKCE(), not from findGrantSource()'s client-identity check (which passes here,
+// since the client presenting the code is exactly the client it was minted for) — checkpoint-3
+// review, Task 20.
+async function substituteCodeChallenge(
+  provider: Provider,
+  res: ServerResponse,
+  interaction: InteractionDetails,
+): Promise<void> {
+  const clientId = interaction.params['client_id'];
+  if (typeof clientId !== 'string') throw new Error('interaction missing client_id');
+  const client = await provider.Client.find(clientId);
+  if (!client) throw new Error('client not registered');
+  const redirectUri = interaction.params['redirect_uri'];
+  if (typeof redirectUri !== 'string') throw new Error('interaction missing redirect_uri');
+  const resourceParam = interaction.params['resource'];
+  if (typeof resourceParam !== 'string') throw new Error('interaction missing resource');
+
+  const grant = new provider.Grant({ accountId: TEST_ACCOUNT_ID, clientId });
+  grant.addOIDCScope('openid offline_access');
+  grant.addResourceScope(resourceParam, 'openid offline_access');
+  const grantId = await grant.save();
+
+  // An S256 challenge for a verifier the AS made up, never seen by the client — the client's
+  // real code_verifier can't produce this, by construction.
+  const foreignChallenge = crypto.hash('sha256', 'as-chosen-verifier-not-the-clients', 'base64url');
+
+  const code = new provider.AuthorizationCode({
+    accountId: TEST_ACCOUNT_ID,
+    client,
+    codeChallenge: foreignChallenge,
+    codeChallengeMethod: 'S256',
+    grantId,
+    redirectUri,
+    resource: resourceParam,
+    scope: 'openid offline_access',
+  });
+  const codeValue = await code.save();
+
+  const target = new URL(redirectUri);
+  target.searchParams.set('code', codeValue);
+  const stateParam = interaction.params['state'];
+  if (typeof stateParam === 'string') target.searchParams.set('state', stateParam);
+  res.writeHead(302, { location: target.toString() });
+  res.end();
+}
+
 // Test 31: the first interaction under this scenario mints and remembers a real code; every
 // subsequent one reuses it instead of minting fresh, with *this* request's own `state` (so
-// state validation passes and the failure is isolated to the code itself). Whether the token
-// endpoint ultimately rejects it as already-consumed (node-oidc-provider's single-use
-// enforcement) or as a PKCE mismatch against this request's own fresh code_verifier is not
-// distinguished here — either is a correct rejection of a replayed code, which is the only
-// property being asserted.
+// state validation passes and the failure is isolated to the code itself). The rejection is
+// deterministically "authorization code not found", not a PKCE mismatch: the test's own
+// logout() between logins revokes the refresh token, and oidc-provider's shared per-grantId
+// membership index (node_modules/oidc-provider/lib/adapters/memory_adapter.js) means that
+// revocation cascades into deleting every token under that grant — including this
+// already-consumed authorization code — so the second exchange's findGrantSource() never finds
+// it at all (checkpoint-3 review, Task 20 — see the test's own comment in
+// authorization-response.spec.ts for the full derivation trace, including two wrong hypotheses
+// checked and rejected against actual runs before this one held).
 async function reissuePreviousCode(
   provider: Provider,
   res: ServerResponse,
@@ -399,6 +488,11 @@ async function handleInteractionGet(
     return;
   }
 
+  if (state.scenarios.substituteCodeChallenge) {
+    await substituteCodeChallenge(provider, res, interaction);
+    return;
+  }
+
   if (state.scenarios.reissuePreviousCode) {
     await reissuePreviousCode(provider, res, interaction);
     return;
@@ -442,7 +536,7 @@ export function createAuthorizationServer(cert: GeneratedCertificates): {
     const url = new URL(req.url ?? '/', ORIGINS.as);
     const authHeader = req.headers.authorization;
 
-    state.logRequest({
+    const seq = state.logRequest({
       server: 'as',
       method: req.method ?? 'GET',
       origin: ORIGINS.as,
@@ -450,7 +544,23 @@ export function createAuthorizationServer(cert: GeneratedCertificates): {
       hadAuthorizationHeader: authHeader !== undefined,
       authorizationTokenId: await bearerTokenId(authHeader),
     });
+    captureResponseErrorCode(res, (code) => state.setRequestErrorCode(seq, code));
+    // Not torn down in a `finally` right after `dispatch()`: `provider.callback()(...)` returns
+    // a plain Node request-handler callback, not a promise, so its internal Koa middleware chain
+    // (where the `grant.error` event is actually emitted, once the async token-grant validation
+    // rejects) is still in flight after `dispatch()` returns. Tearing down immediately raced
+    // ahead of the emit and always missed it. `res`'s `finish` event fires only once the AS has
+    // actually written and completed the response, by which point any `grant.error` for this
+    // request has already fired (checkpoint-3 review, Task 20 — found via empirical probe: the
+    // listener never printed at all under the old teardown).
+    const stopListening = captureGrantErrorDetail(provider, res, seq);
+    res.once('finish', stopListening);
+    res.once('close', stopListening);
 
+    await dispatch(req, res, url);
+  }
+
+  async function dispatch(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const unreachableTarget = unreachableTargetForPath(url.pathname);
     if (unreachableTarget && state.scenarios.unreachable.has(unreachableTarget)) {
       req.socket.destroy();

@@ -115,6 +115,11 @@ declare module 'oidc-provider' {
     constructor(issuer: string, configuration?: Configuration);
     callback(): (req: IncomingMessage, res: ServerResponse) => void;
     use(middleware: (ctx: KoaContext, next: () => Promise<void>) => Promise<void>): void;
+    // Provider extends Node's EventEmitter; only the subset this project actually uses is
+    // declared (checkpoint-3 review, Task 20 — grant.error, to capture the AS's unstripped
+    // rejection detail server-side; see as.ts's captureGrantErrorDetail).
+    on(eventName: string, listener: (ctx: KoaContext, err: unknown) => void): void;
+    off(eventName: string, listener: (ctx: KoaContext, err: unknown) => void): void;
     interactionDetails(req: IncomingMessage, res: ServerResponse): Promise<InteractionDetails>;
     interactionFinished(
       req: IncomingMessage,

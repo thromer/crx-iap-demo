@@ -2,7 +2,7 @@
 
 Checkpoint-3 review, Task 8 (mutations 1–7); Task 10 adds mutation 8; Task 12 adds mutations
 10–13; Task 13 adds mutation 14; Task 14 adds mutation 15; Task 15 adds mutation 16; Task 18
-adds mutation 17; Task 19 adds mutation 18. For each mutation below: the change was applied to the real source
+adds mutation 17; Task 19 adds mutation 18; Task 20 adds mutations 19–21. For each mutation below: the change was applied to the real source
 (test-server mutations don't need an extension rebuild; extension/iap-auth mutations do), the
 named test(s) were run against the mutated build, the result was recorded, and the mutation was
 reverted (`git checkout --` or a manual revert, confirmed clean via `git status`/`grep
@@ -38,6 +38,9 @@ here honestly, including when a mutation doesn't fail as predicted.
 | 16 | `fallbackClientId` branch never used, even when configured (`discovery.ts`'s `registerOrGetClient`) | `client.test.ts`'s "fallbackClientId > succeeds using the configured fallback client id..." | ✅ Failed as expected — same `MISCONFIGURED` error the "without a fallbackClientId" half already covers |
 | 17 | A real type error introduced in `dispatch.ts` (an extra parameter of a nonexistent type) | `yarn workspace @iap-demo/extension build` itself | ✅ Failed as expected — build exits 1, no `dist/` artifact produced, instead of silently building on the untyped-JS output the way Vite alone does |
 | 18 | `registerOrGetClient`'s client-registration cache never hits (`discovery.ts`) | 7 (`via: 'sw'` and `via: 'worker'`) | ✅ Both failed as expected — a spurious `other:/reg` entry appeared in the sequence exactly where the assertion checks for none |
+| 19 | PKCE verification disabled entirely (`node_modules/oidc-provider/lib/helpers/pkce.js`'s `checkPKCE` returns immediately) | 34a | ✅ Failed as expected — `outcome.ok` was `true` (the substituted-challenge exchange succeeded with PKCE unenforced) instead of `false` |
+| 20 | `substituteCodeChallenge`'s minted code bound to the decoy client instead of the real one (`as.ts`) | 34a | ✅ Failed as expected, and specifically at the intended assertion — `outcome.ok` was still `false` (so a weaker "just check it fails" assertion would have passed vacuously), but `errorCode` was `"client mismatch"` instead of `"code_verifier does not match code_challenge"`, caught only by the new error-code assertion |
+| 21 | `MemoryAdapter.revokeByGrantId` neutered (`node_modules/oidc-provider/lib/adapters/memory_adapter.js`) | 31 | ✅ Failed as expected, though not with the predicted message — the authorization code itself was no longer deleted, but `provider.Grant.adapter.destroy(grantId)` (a separate, unaffected call in `revoke.js`) still destroys the grant record directly, so the second exchange failed at `validateGrant()` instead of `findGrantSource()`, with `errorCode` `"grant not found"` instead of the expected `"authorization code not found"` — still a correct kill of the specific assertion, and itself informative about how deep the grant/token cascade goes |
 
 **17 of 19 mutation attempts produced the predicted failure, for the predicted reason** (2, 3, 4, 5, 6, 7, 8b, 8c, 10, 11, 12, 13, 14, 15, 16, 17, 18 fired correctly; 3/57 and 8a did not, both resolved by moving the observation point rather than the assertion — see below).
 
@@ -373,6 +376,75 @@ Mutation-proven (row 18): made `registerOrGetClient`'s cache check never hit, fo
 re-registration on every call. Both `via` variants fail, at the sequence assertion specifically
 — a `other:/reg` entry appears exactly where the assertion checks for none — confirming the new
 assertion genuinely depends on the cache being effective, which no ceiling ever could.
+
+## Task 20: test 34 rejects for the wrong reason — split it, and assert which defense fired
+
+Test 34 (`injectForeignCode`) was labeled a PKCE test but never was one: its decoy code is
+deliberately bound to the *real* client's own `code_challenge` (see the scenario's comment in
+`as.ts`, Task 12), so the rejection comes from `findGrantSource()`'s client-identity check, not
+`checkPKCE()`. Both throw the identical generic `{error: "invalid_grant", error_description:
+"grant request is invalid"}` — checked directly against oidc-provider's source
+(`helpers/errors.js`, `helpers/err_out.js`), not assumed — so nothing in the response body could
+ever have told these two defenses apart, and no test in the suite isolated a genuine PKCE
+`code_verifier` mismatch.
+
+**Fixed the observation surface, not just the test.** The unstripped `error_detail` (e.g.
+`"client mismatch"`, `"code_verifier does not match code_challenge"`) is carried on oidc-provider's
+`grant.error` event, emitted server-side only, never sent to the client (RFC 6749's
+generic-error-response guidance) — a legitimate use of test-double authority: this project
+controls the AS, so it may observe what the client itself never could. `state.ts`'s
+`RequestLogEntry` gained an `errorCode` field; `as.ts`'s `captureGrantErrorDetail` subscribes to
+`grant.error` per-request, correlated via `ctx.res === res`. First finding while wiring this up:
+tearing the listener down in a `finally` immediately after `dispatch()` returned raced ahead of
+the emit and always missed it — `provider.callback()`'s internal Koa middleware chain (where the
+event fires) is not awaitable, since `callback()` returns a plain Node request handler, not a
+promise. Fixed by tearing down on the response's own `finish`/`close` event instead, confirmed
+via an instrumented run before trusting it (row 19's mutation exercises this same capture path).
+
+**20.1/20.2 — split the test.** Test 34 renamed to describe what it verifies (client-identity
+binding) and now asserts `errorCode === "client mismatch"`. New scenario
+`substituteCodeChallenge` (as.ts) and new test 34a: a code correctly bound to the real
+client_id/redirect_uri (so client-identity binding passes) but to an AS-chosen `code_challenge`
+the client's real `code_verifier` structurally cannot satisfy — isolating a genuine PKCE
+rejection, asserted via `errorCode === "code_verifier does not match code_challenge"`.
+
+**20.4 — swept 23, 24, 29, 31, 33 for the same defect** (asserting rejection without asserting
+*why*, leaving room for a plausible earlier check to be the real cause):
+- **23** (crossOriginResourceMetadata) — sound as-is. Already asserts the structural "why": no
+  request to the foreign origin at all, proving a preflight origin check, not a network failure.
+- **24** (issuerMismatch) — real gap, fixed. Added a request-log assertion that no `/reg` or
+  `/auth` request follows, proving the rejection is oauth4webapi's client-side
+  `processDiscoveryResponse` issuer check, not some other metadata failure.
+- **29** (tamperState) — sound as-is. Already asserts no `/token` request follows, proving
+  client-side rejection before any exchange is attempted.
+- **31** (reissuePreviousCode) — real gap, fixed, and the most consequential finding of the
+  sweep. The test's existing comment claimed the rejection couldn't be distinguished between
+  single-use enforcement and PKCE mismatch. Two derivations were tried and checked against actual
+  runs before the truth was found: first assumed PKCE (checkPKCE runs before
+  consumeGrantSource — true, but not what fires here); then assumed the explicit
+  `provider.AuthorizationCode.revokeByGrantId()` call in `revoke.js`'s cascade (also wrong — see
+  row 21). The real mechanism: oidc-provider's `MemoryAdapter` tracks each grant's member tokens
+  in one shared per-grantId index, so *any* `revokeByGrantId()` call — even the unconditional
+  `provider.AccessToken` one — deletes every grantable token under that grant, authorization code
+  included. This test's own `logout()` between logins triggers exactly that. Now asserts
+  `errorCode === "authorization code not found"` deterministically.
+- **33** (denyAuthorization, error redirect with no code) — partial gap, partially fixed. Added a
+  request-log assertion that no `/token` request follows, proving the client never attempts an
+  exchange for a code-less error redirect — the actual "not treated as success" property.
+  Documented, not silently left: with only `denyAuthorization` available to construct this shape,
+  the test still can't separate itself from test 32 on `errorClass` alone (both currently observe
+  `FORBIDDEN`) — a residual limitation, not a false claim of coverage.
+
+Also updated the stale disclosure-table row for test 30 (`docs/checkpoint-3-disclosure.md`),
+which had claimed test 34 stood in for genuine PKCE coverage — now correctly points at 34a.
+
+Mutation-proven (rows 19–21): PKCE verification disabled entirely → 34a fails (`outcome.ok`
+wrongly `true`). `substituteCodeChallenge` pointed at the decoy client → 34a fails specifically
+at the `errorCode` assertion, not by accidentally reproducing test 34 (outcome.ok stayed `false`
+either way — only the new assertion catches the substitution). `revokeByGrantId` neutered → test
+31 still fails, but at a different check (`validateGrant`, "grant not found") than predicted
+(`findGrantSource`, "authorization code not found") — a correct kill of the specific assertion,
+and itself confirmation of how deep the grant-membership cascade goes.
 
 ## Notes on process
 

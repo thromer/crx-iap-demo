@@ -121,6 +121,9 @@ const scenarioHandlers: Record<string, (args: ScenarioArgs) => void> = {
   tamperState: () => {
     state.scenarios.tamperState = true;
   },
+  substituteCodeChallenge: (args) => {
+    state.scenarios.substituteCodeChallenge = bool(args, 'on', true);
+  },
   rejectCodeExchange: () => {
     state.scenarios.rejectCodeExchange = true;
   },

@@ -64,11 +64,22 @@ test('30: a rejected code exchange surfaces a classified error, and a fresh logi
 });
 
 // Test 31: the AS returns the same authorization code for a second login as it did for the
-// first. node-oidc-provider enforces single-use, and the second login's own fresh PKCE pair
-// won't match the first's binding either way — either is a correct rejection of a replayed
-// code, and this test doesn't need to distinguish which fired (see reissuePreviousCode's
-// comment in as.ts). No code_verifier access needed: the AS does the replaying, not the
-// harness reaching into the client.
+// first. Two derivations were tried and checked against actual runs before this one held
+// (checkpoint-3 review, Task 20): (1) assumed a PKCE mismatch, reasoning checkPKCE() runs before
+// consumeGrantSource() — wrong, the actual error was "authorization code not found"; (2) traced
+// that to this test's own logout() revoking the refresh token, and assumed the specific
+// `provider.AuthorizationCode.revokeByGrantId()` call in revoke.js's cascade
+// (node_modules/oidc-provider/lib/helpers/revoke.js) was responsible — also wrong: disabling
+// just that call still produced "authorization code not found", proven by mutation-testing the
+// assumption itself. The real mechanism (confirmed via instrumentation, not just reading):
+// MemoryAdapter tracks each grant's member tokens in one shared per-grantId index
+// (node_modules/oidc-provider/lib/adapters/memory_adapter.js's getGrantMembers/setGrantMembers),
+// and ANY single `<Model>.revokeByGrantId()` call — even just the unconditional
+// `provider.AccessToken` one, first in revoke.js's array — walks that shared index and deletes
+// every grantable token under it, including the authorization code, regardless of which model
+// initiated the call. So the rejection is deterministically "authorization code not found",
+// regardless of code_verifier. No code_verifier access needed: the AS does the replaying, not
+// the harness reaching into the client.
 test('31: a replayed authorization code from a second login fails, and a further fresh login succeeds', async ({
   testServer,
   driver,
@@ -87,8 +98,13 @@ test('31: a replayed authorization code from a second login fails, and a further
   // `new URL(input).origin`, but logout() does not, so passing the full path here would key a
   // different cache entry and silently no-op, leaving the still-valid token cached.
   await driver.send({ type: 'logout', resource: origin });
+  const before = await requestLog(testServer);
   const second = await driver.send<FetchOutcome>({ type: 'fetch', resource });
   expect(second.ok).toBe(false);
+
+  const since = (await requestLog(testServer)).slice(before.length);
+  const tokenRequest = since.find((e) => e.server === 'as' && e.path === '/token');
+  expect(tokenRequest?.errorCode).toBe('authorization code not found');
 
   // Not wedged: turn the scenario off and confirm a further fresh login succeeds.
   await armScenario(testServer, 'reissuePreviousCode', { on: false });
@@ -122,7 +138,11 @@ test('32: denyAuthorization classifies as FORBIDDEN, not retried', async ({
 // Test 33: a redirect with an error and no code must not be treated as success. Reuses
 // denyAuthorization (the only scenario that produces an error-carrying redirect with no code)
 // but asserts the weaker, more general property this test is actually about, distinct from
-// test 32's specific FORBIDDEN classification.
+// test 32's specific FORBIDDEN classification. Note (checkpoint-3 review, Task 20's sweep): with
+// only denyAuthorization available to construct this, this test can't fully separate itself from
+// test 32 — both currently observe the same errorClass. What it adds beyond 32 is the structural
+// check below: the client never even attempts a token exchange for a code-less error redirect,
+// which is the actual "not treated as success" property, proven the same way as test 29.
 test('33: an authorization error redirect with no code is never treated as success', async ({
   testServer,
   driver,
@@ -130,24 +150,64 @@ test('33: an authorization error redirect with no code is never treated as succe
   const resource = `${testServer.origins.rsA}/api/resource`;
   await armScenario(testServer, 'denyAuthorization');
 
+  const before = await requestLog(testServer);
   const outcome = await driver.send<FetchOutcome>({ type: 'fetch', resource });
   expect(outcome.ok).toBe(false);
+
+  const since = (await requestLog(testServer)).slice(before.length);
+  expect(since.filter((e) => e.server === 'as' && e.path === '/token')).toHaveLength(0);
 });
 
-// Test 34: injectForeignCode -> rejected. The decoy client's authorization code, handed to the
-// real client's redirect_uri, must be rejected at the token endpoint. Correction (checkpoint-3
-// review, Task 12): this scenario's code is deliberately bound to the real client's own
-// code_challenge (see injectForeignCode's comment in packages/test-server/src/as.ts) — the
-// rejection comes from client-identity binding (the code belongs to a different client_id than
-// the one presenting it), not a PKCE code_verifier mismatch. Both are real RFC 9700 defenses
-// against adjacent attacks; this test exercises client binding, not PKCE specifically. No test
-// in this suite currently exercises a genuine PKCE code_verifier mismatch in isolation — that
-// would need its own scenario (a code correctly bound to the real client but a wrong/foreign
-// code_challenge), not yet written.
-test('34: an injected foreign authorization code is rejected', async ({ testServer, driver }) => {
+// Test 34: injectForeignCode -> rejected on client-identity binding, not PKCE. Correction
+// (checkpoint-3 review, Task 12): this scenario's code is deliberately bound to the real
+// client's own code_challenge (see injectForeignCode's comment in
+// packages/test-server/src/as.ts) — the rejection comes from client-identity binding (the code
+// belongs to a different client_id than the one presenting it), not a PKCE code_verifier
+// mismatch. Both are real RFC 9700 defenses against adjacent attacks; this test exercises client
+// binding specifically, asserted below via the AS's captured error_detail (checkpoint-3 review,
+// Task 20). Test 34a exercises the PKCE case.
+test('34: an injected foreign authorization code is rejected on client-identity binding', async ({
+  testServer,
+  driver,
+}) => {
   const resource = `${testServer.origins.rsA}/api/resource`;
   await armScenario(testServer, 'injectForeignCode');
 
+  const before = await requestLog(testServer);
   const outcome = await driver.send<FetchOutcome>({ type: 'fetch', resource });
   expect(outcome.ok).toBe(false);
+
+  const since = (await requestLog(testServer)).slice(before.length);
+  const tokenRequest = since.find((e) => e.server === 'as' && e.path === '/token');
+  expect(tokenRequest?.errorCode).toBe('client mismatch');
+});
+
+// Test 34a: substituteCodeChallenge -> rejected on PKCE, not client-identity binding. The code
+// is bound to the real client_id and redirect_uri (so findGrantSource()'s client-identity check
+// passes) but to an AS-chosen code_challenge the client's real code_verifier can't satisfy —
+// isolating checkPKCE()'s rejection from test 34's (checkpoint-3 review, Task 20).
+test('34a: a code bound to a substituted code_challenge is rejected on PKCE mismatch', async ({
+  testServer,
+  driver,
+}) => {
+  const resource = `${testServer.origins.rsA}/api/resource`;
+  await armScenario(testServer, 'substituteCodeChallenge');
+
+  const before = await requestLog(testServer);
+  const outcome = await driver.send<FetchOutcome>({ type: 'fetch', resource });
+  expect(outcome.ok).toBe(false);
+  if (!outcome.ok) expect(outcome.errorClass).toBe('MISCONFIGURED');
+
+  const since = (await requestLog(testServer)).slice(before.length);
+  const tokenRequest = since.find((e) => e.server === 'as' && e.path === '/token');
+  expect(tokenRequest?.errorCode).toBe('code_verifier does not match code_challenge');
+
+  // Not wedged: a fresh login attempt right after succeeds normally. Unlike rejectCodeExchange,
+  // substituteCodeChallenge isn't single-shot (it drives the interaction handler on every
+  // authorization, like injectForeignCode/tamperState) — disarm it first so this retry gets a
+  // real code_challenge instead of repeating the same rejection.
+  await armScenario(testServer, 'substituteCodeChallenge', { on: false });
+  const retry = await driver.send<FetchOutcome>({ type: 'fetch', resource });
+  expect(retry.ok).toBe(true);
+  if (retry.ok) expect(retry.status).toBe(200);
 });

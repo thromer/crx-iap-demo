@@ -10,6 +10,13 @@ export interface RequestLogEntry {
   // (see hash.ts) — identity, never the raw value. undefined when hadAuthorizationHeader is
   // false, or the header isn't a well-formed `Bearer <token>` (checkpoint-3 review, Task 13).
   authorizationTokenId: string | undefined;
+  // The OAuth `error` field from this request's response body, when it's an error response
+  // (RFC 6749 §5.2 shape: `{error: "...", ...}`) — captured generically from whatever actually
+  // gets written, whether from this project's own scenario handlers or oidc-provider's native
+  // error responses (invalid_client, invalid_grant from PKCE failure, etc.), so a test can
+  // assert *which* defense rejected a request instead of only that something did
+  // (checkpoint-3 review, Task 20). undefined for non-error responses.
+  errorCode: string | undefined;
 }
 
 export type AppLevel401Kind = 'basic' | 'bare' | 'json';
@@ -61,6 +68,11 @@ export interface ScenarioState {
   tamperState: boolean;
   rejectCodeExchange: boolean;
   reissuePreviousCode: boolean;
+  // A code correctly bound to the real client_id/redirect_uri but to an AS-chosen
+  // code_challenge, not the client's own — isolates a genuine PKCE code_verifier mismatch from
+  // the client-identity-binding rejection injectForeignCode exercises (checkpoint-3 review,
+  // Task 20, test 34a).
+  substituteCodeChallenge: boolean;
 
   tokenEndpointStatus: { code: number; retryAfter: number | undefined } | undefined;
   tokenEndpointHangSeconds: number | undefined;
@@ -99,6 +111,7 @@ export function defaultScenarioState(): ScenarioState {
     tamperState: false,
     rejectCodeExchange: false,
     reissuePreviousCode: false,
+    substituteCodeChallenge: false,
 
     tokenEndpointStatus: undefined,
     tokenEndpointHangSeconds: undefined,
@@ -124,9 +137,23 @@ class TestServerState {
     this.reissuedCode = undefined;
   }
 
-  logRequest(entry: Omit<RequestLogEntry, 'seq' | 'timestamp'>): void {
+  // Returns the assigned seq so the caller can attach an errorCode later, once the response
+  // body is actually known (checkpoint-3 review, Task 20) — logged at request start, same as
+  // before, so entry ordering across concurrent requests is unaffected.
+  logRequest(entry: Omit<RequestLogEntry, 'seq' | 'timestamp' | 'errorCode'>): number {
     this.seq += 1;
-    this.requestLog.push({ ...entry, seq: this.seq, timestamp: Date.now() });
+    this.requestLog.push({ ...entry, seq: this.seq, timestamp: Date.now(), errorCode: undefined });
+    return this.seq;
+  }
+
+  // First-write-wins: a provider error *event* (see as.ts's captureGrantErrorDetail) carries
+  // the unstripped detail and fires before the response is written, so it's always tried
+  // first; the response-body fallback (captureResponseErrorCode) only fills in when nothing
+  // more specific was already captured — e.g. this project's own scenario handlers, which
+  // never trigger oidc-provider's own error events at all (checkpoint-3 review, Task 20).
+  setRequestErrorCode(seq: number, errorCode: string): void {
+    const found = this.requestLog.find((e) => e.seq === seq);
+    if (found && found.errorCode === undefined) found.errorCode = errorCode;
   }
 }
 
